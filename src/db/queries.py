@@ -48,6 +48,12 @@ def insert_memory(
     """
     memory_id = uuid.uuid4()
     
+    # Ensure JSON fields are proper Python dicts/lists
+    entities_dict = dict(entities) if entities else {}
+    tags_list = list(tags) if tags else []
+    tag_sources_dict = dict(tag_sources) if tag_sources else {}
+    metadata_dict = dict(metadata) if metadata else {}
+    
     with get_db_cursor() as cursor:
         cursor.execute("""
             INSERT INTO memory (
@@ -58,19 +64,19 @@ def insert_memory(
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
         """, (
-            memory_id,
+            str(memory_id),
             source,
             source_id,
             content,
             raw_content,
             embedding,
-            json.dumps(entities) if entities else {},
-            tags or [],
-            json.dumps(tag_sources) if tag_sources else {},
+            json.dumps(entities_dict),
+            tags_list,
+            json.dumps(tag_sources_dict),
             importance,
             original_date,
             language,
-            json.dumps(metadata) if metadata else {}
+            json.dumps(metadata_dict)
         ))
     
     return memory_id

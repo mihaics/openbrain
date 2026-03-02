@@ -97,3 +97,28 @@ backup:
   path: /backups
   retention_days: 30
   schedule: "0 2 * * *"  # Daily at 2 AM
+
+# Security / Sandbox settings
+security:
+  # Execution mode: direct (default) or sandbox
+  mode: ${SECURITY_MODE:-direct}
+  
+  # OpenSandbox configuration
+  sandbox:
+    # Server URL (start with: opensandbox-server)
+    server_url: ${SANDBOX_SERVER_URL:-http://localhost:8080}
+    
+    # Docker image for sandbox
+    image: ${SANDBOX_IMAGE:-opensandbox/code-interpreter:v1.0.1}
+    
+    # Default timeout in seconds
+    timeout_seconds: ${SANDBOX_TIMEOUT:-300}
+    
+    # Workspace mount (empty = ephemeral only)
+    # workspace_mount: /path/to/workspace
+    
+    # Network settings
+    network:
+      allow_egress: true
+      block_egress: false
+      allowed_ports: [80, 443]

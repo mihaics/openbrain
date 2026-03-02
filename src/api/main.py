@@ -152,7 +152,7 @@ async def create_memory(memory: MemoryCreate):
     return {
         "id": str(memory_id),
         "status": "stored",
-        "tags": list(tags.keys())
+        "tags": tags
     }
 
 
