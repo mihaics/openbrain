@@ -1,110 +1,56 @@
 services:
-  # PostgreSQL with pgvector extension
   postgres:
     image: pgvector/pgvector:pg16
     container_name: openbrain-postgres
     environment:
-      POSTGRES_DB: ${DB_NAME:-openbrain}
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-openbrain}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: openbrain
+      POSTGRES_DB: openbrain
+    ports:
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "${DB_PORT:-5433}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - openbrain-net
 
-  # Open Brain API Server
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: openbrain-api
+    env_file:
+      - .env
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_NAME: ${DB_NAME:-openbrain}
-      DB_USER: ${DB_USER:-postgres}
-      DB_PASSWORD: ${DB_PASSWORD:-openbrain}
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: openbrain
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      EMBEDDER_MODEL: ${EMBEDDER_MODEL:-nomic-embed-text}
-      MCP_HOST: 0.0.0.0
-      MCP_PORT: 8080
-      API_HOST: 0.0.0.0
-      API_PORT: 8000
-      STREAMLIT_PORT: 8501
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - openbrain-net
-    command: python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 
-  # Streamlit Dashboard
   dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: openbrain-dashboard
+    env_file:
+      - .env
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_NAME: ${DB_NAME:-openbrain}
-      DB_USER: ${DB_USER:-postgres}
-      DB_PASSWORD: ${DB_PASSWORD:-openbrain}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: openbrain
       STREAMLIT_PORT: 8501
     ports:
       - "8501:8501"
     depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-      - ./ui:/app/ui
-    networks:
-      - openbrain-net
+      - postgres
     command: streamlit run ui/dashboard.py --server.port=8501 --server.address=0.0.0.0
-
-  # MCP Server (separate for flexibility)
-  mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: openbrain-mcp
-    environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: ${DB_NAME:-openbrain}
-      DB_USER: ${DB_USER:-postgres}
-      DB_PASSWORD: ${DB_PASSWORD:-openbrain}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      EMBEDDER_MODEL: ${EMBEDDER_MODEL:-nomic-embed-text}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-    networks:
-      - openbrain-net
-    command: python src/main.py
 
 volumes:
   postgres_data:
-
-networks:
-  openbrain-net:
-    driver: bridge

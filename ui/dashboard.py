@@ -10,16 +10,16 @@ import pandas as pd
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from db.connection import init_db
-from db.queries import (
+from src.db.connection import init_db
+from src.db.queries import (
     search_memories,
     get_memory_stats,
     get_recent_memories,
     insert_memory
 )
-from embedder import create_embedding
-from extractors.entities import extract_entities
-from extractors.tagger import auto_tag
+from src.embedder import create_embedding
+from src.extractors.entities import extract_entities
+from src.extractors.tagger import auto_tag
 
 
 # Page config
@@ -184,7 +184,7 @@ def trends_ui():
     """Trends interface."""
     st.header("📈 Trends")
     
-    from analytics.trends import TrendAnalyzer
+    from src.analytics.trends import TrendAnalyzer
     
     analyzer = TrendAnalyzer()
     
