@@ -1,0 +1,99 @@
+# Open Brain Configuration
+
+database:
+  host: ${DB_HOST:-localhost}
+  port: ${DB_PORT:-5432}
+  name: ${DB_NAME:-openbrain}
+  user: ${DB_USER:-postgres}
+  password: ${DB_PASSWORD}
+
+# Embedder Configuration
+# Providers: openrouter, openai, ollama, custom
+embedder:
+  # Choose provider: openrouter (default/free), openai, ollama, custom
+  provider: ${EMBEDDER_PROVIDER:-openrouter}
+  
+  # Model to use (depends on provider)
+  # OpenRouter: text-embedding-3-small, text-embedding-ada-002
+  # OpenAI: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
+  # Ollama: nomic-embed-text, mxbai-embed-large, etc.
+  # Custom: your model name
+  model: ${EMBEDDER_MODEL:-text-embedding-3-small}
+  
+  # Embedding dimensions (auto-detected for most models)
+  dimensions: 768
+
+  # ==== Provider-Specific Settings ====
+  
+  # OpenRouter (FREE TIER AVAILABLE!)
+  # Just set OPENROUTER_API_KEY env var
+  # No config needed here - uses env var
+  
+  # OpenAI (optional)
+  # Set OPENAI_API_KEY env var
+  
+  # Ollama (optional, for local embeddings)
+  # Set OLLAMA_BASE_URL env var (default: http://localhost:11434)
+  # ollama_base_url: http://localhost:11434
+  
+  # Custom API (any OpenAI-compatible API)
+  # Set CUSTOM_API_URL and CUSTOM_API_KEY env vars
+  # Examples: Anthropic, Cohere, local LLMs, etc.
+  # custom_base_url: https://api.anthropic.com
+  # custom_api_key: ${CUSTOM_API_KEY}
+
+mcp:
+  host: 0.0.0.0
+  port: ${MCP_PORT:-8080}
+
+# API Server (optional)
+api:
+  host: 0.0.0.0
+  port: ${API_PORT:-8000}
+  cors_origins:
+    - "*"
+
+# Dashboard (Streamlit)
+dashboard:
+  port: ${DASHBOARD_PORT:-8501}
+
+tags:
+  # Sensitive tags that should never be auto-applied
+  deny_list:
+    - password
+    - secret
+    - api_key
+    - token
+    - credential
+  
+  # Default tags applied to all memories
+  default_tags:
+    - auto
+
+analytics:
+  # Number of weeks for trend analysis
+  trend_weeks: 4
+  
+  # Day of week for weekly reports (0=Monday, 6=sunday)
+  weekly_report_day: 6
+  
+  # Enable notifications
+  notifications:
+    telegram:
+      enabled: false
+      bot_token: ${TELEGRAM_BOT_TOKEN}
+      chat_id: ${TELEGRAM_CHAT_ID}
+    email:
+      enabled: false
+      smtp_host: ${SMTP_HOST}
+      smtp_port: ${SMTP_PORT}
+      smtp_user: ${SMTP_USER}
+      smtp_password: ${SMTP_PASSWORD}
+      from_email: ${EMAIL_FROM}
+
+# Backup settings
+backup:
+  enabled: true
+  path: /backups
+  retention_days: 30
+  schedule: "0 2 * * *"  # Daily at 2 AM
