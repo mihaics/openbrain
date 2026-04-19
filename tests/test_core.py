@@ -109,6 +109,13 @@ class TestTagger:
         assert 'important' in tags
         assert 'review' in tags
     
+    def test_people_entity_does_not_auto_tag(self):
+        """NER misfires made the `people` tag land on ~90% of memories —
+        the blanket auto-tag is intentionally dropped."""
+        from extractors.tagger import auto_tag
+        tags = auto_tag("meeting with Alice and Bob", entities={'people': ['Alice', 'Bob']})
+        assert 'people' not in tags
+
     def test_deny_list(self):
         """Test deny list filtering."""
         from extractors.tagger import Tagger

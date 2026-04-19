@@ -47,12 +47,31 @@ class Tagger:
     
     def __init__(self, config_path: str = None):
         config = TagConfig.get_instance(config_path)
-        
+
         self.deny_list = config.deny_list
         self.default_tags = config.default_tags
-        
+
         self._initialize_keyword_patterns()
         self._initialize_pattern_rules()
+        self._compile_keyword_regex()
+
+    def _compile_keyword_regex(self):
+        """Precompile word-boundary regex for each keyword.
+
+        Substring matching mis-tagged 'go' in 'good' and 'java' in 'javascript'.
+        `\b` doesn't fire around '+' or '.', so wrap those keywords with
+        explicit non-word / start-end anchors.
+        """
+        self._keyword_patterns: List[tuple] = []
+        for kw, tag in self.keyword_tags.items():
+            if re.fullmatch(r"[\w\s]+", kw):
+                pat = re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE)
+            else:
+                pat = re.compile(
+                    rf"(?:(?<=\s)|(?<=^)){re.escape(kw)}(?:(?=\s)|(?=$)|(?=[^\w.+#-]))",
+                    re.IGNORECASE,
+                )
+            self._keyword_patterns.append((pat, tag))
     
     def _initialize_keyword_patterns(self):
         """Initialize keyword-to-tag mappings."""
@@ -182,13 +201,13 @@ class Tagger:
             Dictionary mapping tags to their sources
         """
         tags: Dict[str, str] = {}
-        text_lower = text.lower()
-        
-        # Layer 1: Keyword-based tagging
-        for keyword, tag in self.keyword_tags.items():
-            if keyword in text_lower:
-                if tag not in self.deny_list:
-                    tags[tag] = 'keyword'
+
+        # Layer 1: Keyword-based tagging (word-boundary, not substring)
+        for pattern, tag in self._keyword_patterns:
+            if tag in self.deny_list:
+                continue
+            if pattern.search(text):
+                tags[tag] = 'keyword'
         
         # Layer 2: Pattern-based tagging
         for pattern_args in self.pattern_tags:
@@ -207,17 +226,19 @@ class Tagger:
             for t in tech:
                 if t not in self.deny_list:
                     tags[t] = 'entity'
-            
+
             # Hashtags from content
             hashtags = entities.get('hashtags', [])
             for h in hashtags:
                 tag = h.lstrip('#')
                 if tag not in self.deny_list:
                     tags[tag] = 'entity'
-            
-            # People → tag as 'people'
-            if entities.get('people'):
-                tags['people'] = 'entity'
+
+            # NOTE: we intentionally do NOT auto-tag 'people' from NER.
+            # NLTK's NER misfires on capitalised phrases ("Always", "Correct",
+            # "Bolt AsyncApp") so the blanket tag ended up on 90%+ of memories
+            # — pure noise for retrieval. Callers that genuinely want a people
+            # tag can pass `user_tags=['person:<name>']` explicitly.
         
         # Layer 4: Source-based tagging
         if source:
@@ -259,9 +280,15 @@ class Tagger:
         return list(tag_sources.keys())
 
 
+_tagger_instance: Optional[Tagger] = None
+
+
 def get_tagger(config_path: str = None) -> Tagger:
-    """Get a tagger instance."""
-    return Tagger(config_path)
+    """Get a shared tagger instance (regexes are compiled once)."""
+    global _tagger_instance
+    if _tagger_instance is None or config_path is not None:
+        _tagger_instance = Tagger(config_path)
+    return _tagger_instance
 
 
 def auto_tag(
