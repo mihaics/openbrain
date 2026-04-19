@@ -894,7 +894,9 @@ def bulk_delete_memories(
     filters: List[str] = []
     params: List[Any] = []
     if ids:
-        filters.append("id = ANY(%s)")
+        # Explicit ::uuid[] cast — psycopg2 sends the list as text[], which
+        # doesn't have a default operator against memory.id (uuid).
+        filters.append("id = ANY(%s::uuid[])")
         params.append([str(i) for i in ids])
     if sources:
         filters.append("source = ANY(%s)")

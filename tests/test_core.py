@@ -367,6 +367,23 @@ class TestBulkDelete:
         assert "tags @> %s" in sql_text
         assert params == (['mcp'], ['deprecated'])
 
+    @patch('db.queries.get_db_cursor')
+    def test_bulk_delete_by_ids_casts_to_uuid_array(self, mock_cursor):
+        """Regression: without `::uuid[]`, Postgres rejects id = ANY(text[])."""
+        from db import queries
+
+        mock_ctx = Mock()
+        mock_ctx.__enter__ = Mock(return_value=mock_ctx)
+        mock_ctx.__exit__ = Mock(return_value=False)
+        mock_cursor.return_value = mock_ctx
+        mock_ctx.rowcount = 2
+
+        ids = [uuid.uuid4(), uuid.uuid4()]
+        queries.bulk_delete_memories(ids=ids)
+        sql_text, params = mock_ctx.execute.call_args[0]
+        assert "id = ANY(%s::uuid[])" in sql_text
+        assert params == ([str(i) for i in ids],)
+
 
 class TestFindDuplicates:
     """memory_find_duplicates query shape."""
