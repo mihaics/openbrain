@@ -9,7 +9,21 @@ from typing import Any, Dict, List, Optional
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
-from .connection import get_db_cursor
+from .connection import get_db_cursor, get_vector_dim
+
+
+def _validate_embedding_dim(embedding: Optional[List[float]]) -> Optional[List[float]]:
+    """Reject embeddings whose length doesn't match the DB column dimension."""
+    if embedding is None:
+        return None
+    expected = get_vector_dim()
+    if expected and len(embedding) != expected:
+        raise ValueError(
+            f"Embedding dimension mismatch: got {len(embedding)}, "
+            f"memory.embedding column is vector({expected}). "
+            f"Reconfigure the embedder provider/model or run an ALTER TABLE."
+        )
+    return embedding
 
 
 def insert_memory(
@@ -47,7 +61,9 @@ def insert_memory(
         UUID of the inserted memory
     """
     memory_id = uuid.uuid4()
-    
+
+    embedding = _validate_embedding_dim(embedding)
+
     # Ensure JSON fields are proper Python dicts/lists
     entities_dict = dict(entities) if entities else {}
     tags_list = list(tags) if tags else []
@@ -88,14 +104,17 @@ def search_memories(
     limit: int = 5,
     sources: Optional[List[str]] = None,
     tags: Optional[List[str]] = None,
+    tags_all: Optional[List[str]] = None,
     date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None
+    date_to: Optional[datetime] = None,
+    importance_min: Optional[float] = None,
+    importance_max: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """
     Hybrid search: combines full-text search (PostgreSQL tsvector + ILIKE)
     with semantic vector search (pgvector), ranked by Reciprocal Rank Fusion.
 
-    RRF score = 1/(k + rank_fts) + 1/(k + rank_vector) where k=60.
+    RRF score = 1/(k_fts + rank_fts) + 1/(k_vec + rank_vector).
     Falls back to text-only or vector-only when one signal is unavailable.
     """
     # Build shared filter conditions
@@ -108,28 +127,40 @@ def search_memories(
     if tags:
         filters.append("tags && %s")
         filter_params.append(tags)
+    if tags_all:
+        filters.append("tags @> %s")
+        filter_params.append(tags_all)
     if date_from:
         filters.append("created_at >= %s")
         filter_params.append(date_from)
     if date_to:
         filters.append("created_at <= %s")
         filter_params.append(date_to)
+    if importance_min is not None:
+        filters.append("importance >= %s")
+        filter_params.append(float(importance_min))
+    if importance_max is not None:
+        filters.append("importance <= %s")
+        filter_params.append(float(importance_max))
 
     filter_clause = " AND ".join(filters) if filters else "TRUE"
 
     has_text = bool(query and query.strip())
     has_vector = embedding is not None
+    if has_vector:
+        embedding = _validate_embedding_dim(embedding)
 
     # Candidate pool: fetch more than limit so RRF has enough to merge
     pool = max(limit * 4, 20)
 
     # --- Hybrid search: both text and vector available ---
     if has_text and has_vector:
-        # FTS CTE: full-text search via tsvector (GIN index) + ILIKE fallback
-        # Uses k=1 for text rank (strong boost for keyword matches) vs k=60 for vector
-        # This ensures keyword hits always outrank semantic-only matches
+        # Candidate CTEs rank inner rows, then the outer select orders by the
+        # generated rank before applying LIMIT — without this the planner may
+        # pick arbitrary rows. k=1 for text vs k=60 for vector biases toward
+        # keyword matches when both signals fire.
         query_sql = f"""
-            WITH fts AS (
+            WITH fts_ranked AS (
                 SELECT id,
                     ROW_NUMBER() OVER (ORDER BY
                         ts_rank(to_tsvector('english', content), plainto_tsquery('english', %s)) DESC,
@@ -142,13 +173,21 @@ def search_memories(
                         to_tsvector('english', content) @@ plainto_tsquery('english', %s)
                         OR content ILIKE %s
                     )
+            ),
+            fts AS (
+                SELECT id, rank_fts FROM fts_ranked
+                ORDER BY rank_fts
                 LIMIT %s
             ),
-            vec AS (
+            vec_ranked AS (
                 SELECT id,
                     ROW_NUMBER() OVER (ORDER BY embedding <=> %s::vector) AS rank_vec
                 FROM memory
                 WHERE ({filter_clause}) AND embedding IS NOT NULL
+            ),
+            vec AS (
+                SELECT id, rank_vec FROM vec_ranked
+                ORDER BY rank_vec
                 LIMIT %s
             ),
             rrf AS (
@@ -281,37 +320,123 @@ def delete_memory(memory_id: uuid.UUID) -> bool:
 
 
 def update_memory_tags(memory_id: uuid.UUID, tags: List[str]) -> bool:
-    """Update tags for a memory. Returns True if updated."""
+    """Replace the tag list on a memory, preserving provenance for tags that
+    were already present. New tags get source='user'."""
     with get_db_cursor() as cursor:
-        cursor.execute("UPDATE memory SET tags = %s WHERE id = %s", (tags, str(memory_id)))
+        cursor.execute(
+            "SELECT tag_sources FROM memory WHERE id = %s",
+            (str(memory_id),),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return False
+        existing = row['tag_sources'] if isinstance(row, dict) else row[0]
+        if isinstance(existing, str):
+            existing = json.loads(existing)
+        existing = existing or {}
+
+        tag_sources = {t: existing.get(t, 'user') for t in tags}
+        cursor.execute(
+            "UPDATE memory SET tags = %s, tag_sources = %s WHERE id = %s",
+            (tags, json.dumps(tag_sources), str(memory_id)),
+        )
         return cursor.rowcount > 0
 
 
-def update_memory(memory_id: uuid.UUID, content: str, tags: List[str], source: str, importance: float) -> bool:
-    """Update a memory's content, tags, source and importance. Returns True if updated."""
+def update_memory(
+    memory_id: uuid.UUID,
+    content: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    source: Optional[str] = None,
+    importance: Optional[float] = None,
+    embedding: Optional[List[float]] = None,
+    entities: Optional[Dict] = None,
+    tag_sources: Optional[Dict] = None,
+) -> bool:
+    """Partially update a memory. Only fields that are not None are written."""
+    sets: List[str] = []
+    params: List[Any] = []
+
+    if content is not None:
+        sets.append("content = %s")
+        params.append(content)
+    if tags is not None:
+        sets.append("tags = %s")
+        params.append(tags)
+    if source is not None:
+        sets.append("source = %s")
+        params.append(source)
+    if importance is not None:
+        sets.append("importance = %s")
+        params.append(float(importance))
+    if embedding is not None:
+        sets.append("embedding = %s")
+        params.append(_validate_embedding_dim(embedding))
+    if entities is not None:
+        sets.append("entities = %s")
+        params.append(json.dumps(entities))
+    if tag_sources is not None:
+        sets.append("tag_sources = %s")
+        params.append(json.dumps(tag_sources))
+
+    if not sets:
+        return False
+
+    params.append(str(memory_id))
     with get_db_cursor() as cursor:
         cursor.execute(
-            "UPDATE memory SET content = %s, tags = %s, source = %s, importance = %s WHERE id = %s",
-            (content, tags, source, importance, str(memory_id))
+            f"UPDATE memory SET {', '.join(sets)} WHERE id = %s",
+            tuple(params),
         )
         return cursor.rowcount > 0
 
 
 def get_related_memories(
     memory_id: uuid.UUID,
-    limit: int = 5
+    limit: int = 5,
+    min_similarity: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Get memories related to a given memory."""
-    memory = get_memory_by_id(memory_id)
-    if not memory or not memory.get('embedding'):
-        return []
-    
-    # Use vector similarity
-    return search_memories(
-        query="",
-        embedding=memory['embedding'],
-        limit=limit
-    )
+    """Get memories semantically related to the given memory (excluding itself).
+
+    `min_similarity` is applied inside the query so callers always get up to
+    `limit` rows above threshold, never a truncated set.
+    """
+    params: List[Any] = [str(memory_id), str(memory_id)]
+    sim_clause = ""
+    if min_similarity is not None:
+        sim_clause = "AND 1.0 - (m.embedding <=> (SELECT embedding FROM target)) >= %s"
+        params.append(float(min_similarity))
+    params.append(limit)
+
+    with get_db_cursor() as cursor:
+        cursor.execute(f"""
+            WITH target AS (
+                SELECT embedding FROM memory WHERE id = %s AND embedding IS NOT NULL
+            )
+            SELECT m.id, m.source, m.source_id, m.content, m.raw_content,
+                   m.entities, m.tags, m.tag_sources, m.importance, m.created_at,
+                   m.original_date, m.language, m.metadata,
+                   1.0 - (m.embedding <=> (SELECT embedding FROM target)) AS score
+            FROM memory m, target
+            WHERE m.id <> %s AND m.embedding IS NOT NULL
+                {sim_clause}
+            ORDER BY m.embedding <=> (SELECT embedding FROM target)
+            LIMIT %s
+        """, tuple(params))
+        results = cursor.fetchall()
+
+    memories = []
+    for row in results:
+        mem = dict(row)
+        if isinstance(mem.get('entities'), str):
+            mem['entities'] = json.loads(mem['entities'])
+        if isinstance(mem.get('metadata'), str):
+            mem['metadata'] = json.loads(mem['metadata'])
+        if isinstance(mem.get('tag_sources'), str):
+            mem['tag_sources'] = json.loads(mem['tag_sources'])
+        mem['score'] = float(row.get('score', 0))
+        memories.append(mem)
+    return memories
 
 
 def get_memories_by_entity(
@@ -421,13 +546,54 @@ def get_memory_stats() -> Dict[str, Any]:
     }
 
 
+def count_memories(
+    sources: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+    tags_all: Optional[List[str]] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    importance_min: Optional[float] = None,
+    importance_max: Optional[float] = None,
+) -> int:
+    """Count memories matching the same filter set as search_memories."""
+    filters: List[str] = []
+    params: List[Any] = []
+    if sources:
+        filters.append("source = ANY(%s)")
+        params.append(sources)
+    if tags:
+        filters.append("tags && %s")
+        params.append(tags)
+    if tags_all:
+        filters.append("tags @> %s")
+        params.append(tags_all)
+    if date_from:
+        filters.append("created_at >= %s")
+        params.append(date_from)
+    if date_to:
+        filters.append("created_at <= %s")
+        params.append(date_to)
+    if importance_min is not None:
+        filters.append("importance >= %s")
+        params.append(float(importance_min))
+    if importance_max is not None:
+        filters.append("importance <= %s")
+        params.append(float(importance_max))
+
+    where = " AND ".join(filters) if filters else "TRUE"
+    with get_db_cursor() as cursor:
+        cursor.execute(f"SELECT COUNT(*) AS c FROM memory WHERE {where}", tuple(params))
+        row = cursor.fetchone()
+    return int(row['c'] if isinstance(row, dict) else row[0])
+
+
 def get_trending_tags(weeks: int = 4, limit: int = 10) -> Dict[str, int]:
     """Get trending tags over the specified number of weeks."""
     with get_db_cursor() as cursor:
         cursor.execute("""
             SELECT tag, COUNT(*) as count
             FROM memory, UNNEST(tags) as tag
-            WHERE created_at >= CURRENT_DATE - INTERVAL '%s weeks'
+            WHERE created_at >= CURRENT_DATE - make_interval(weeks => %s)
             GROUP BY tag
             ORDER BY count DESC
             LIMIT %s
@@ -503,19 +669,24 @@ def get_timeline_memories(
     if date_from is None:
         date_from = date_to - timedelta(days=7)
 
+    # Hard cap keeps a pathological date range from pulling the whole table
+    # into memory. Per-day trimming is still applied on the Python side below.
+    window_days = max((date_to - date_from).days + 1, 1)
+    row_cap = min(max(limit_per_day * window_days, 100), 20_000)
+
+    # Single transaction: fetch rows + has_more sentinel together.
     with get_db_cursor() as cursor:
         cursor.execute("""
-            SELECT id, source, content, tags, entities, importance,
-                   created_at, original_date, metadata,
+            SELECT id, source, content, tags, entities, tag_sources,
+                   importance, language, created_at, original_date, metadata,
                    created_at::date AS day
             FROM memory
             WHERE created_at >= %s AND created_at <= %s
             ORDER BY created_at DESC
-        """, (date_from, date_to))
+            LIMIT %s
+        """, (date_from, date_to, row_cap))
         results = cursor.fetchall()
 
-    has_more = False
-    with get_db_cursor() as cursor:
         cursor.execute(
             "SELECT EXISTS(SELECT 1 FROM memory WHERE created_at < %s) AS has_more",
             (date_from,)
@@ -530,6 +701,8 @@ def get_timeline_memories(
             mem['entities'] = json.loads(mem['entities'])
         if isinstance(mem.get('metadata'), str):
             mem['metadata'] = json.loads(mem['metadata'])
+        if isinstance(mem.get('tag_sources'), str):
+            mem['tag_sources'] = json.loads(mem['tag_sources'])
         day_key = str(mem.pop('day'))
         day_counts.setdefault(day_key, 0)
         day_counts[day_key] += 1
@@ -646,6 +819,114 @@ def get_entity_graph(
     return {"nodes": nodes, "edges": edges}
 
 
+def find_duplicate_pairs(
+    threshold: float = 0.95,
+    limit: int = 50,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    sources: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Return memory pairs whose cosine similarity is ≥ threshold.
+
+    Each pair appears once (id_a < id_b) and is sorted by similarity desc.
+    Scoped by optional date range / sources so callers can dedupe a slice
+    rather than scanning the whole table (HNSW still helps, but pairwise
+    joins blow up quadratically without a narrow pool).
+    """
+    filters: List[str] = ["a.embedding IS NOT NULL", "b.embedding IS NOT NULL", "a.id < b.id"]
+    params: List[Any] = []
+
+    def _scope(alias: str) -> None:
+        if sources:
+            filters.append(f"{alias}.source = ANY(%s)")
+            params.append(sources)
+        if date_from:
+            filters.append(f"{alias}.created_at >= %s")
+            params.append(date_from)
+        if date_to:
+            filters.append(f"{alias}.created_at <= %s")
+            params.append(date_to)
+
+    _scope("a")
+    _scope("b")
+
+    # Self-join via HNSW is expensive; constrain candidates to the scoped set
+    # via a CTE so the planner doesn't try to pair the whole table.
+    params.append(float(threshold))
+    params.append(int(limit))
+    where = " AND ".join(filters)
+
+    with get_db_cursor() as cursor:
+        cursor.execute(f"""
+            WITH scoped AS (
+                SELECT id, embedding, content, source, created_at FROM memory
+                WHERE embedding IS NOT NULL
+            )
+            SELECT a.id AS id_a, b.id AS id_b,
+                   1.0 - (a.embedding <=> b.embedding) AS similarity,
+                   a.content AS content_a, b.content AS content_b,
+                   a.source AS source_a, b.source AS source_b,
+                   a.created_at AS created_at_a, b.created_at AS created_at_b
+            FROM scoped a JOIN scoped b ON {where}
+              AND 1.0 - (a.embedding <=> b.embedding) >= %s
+            ORDER BY similarity DESC
+            LIMIT %s
+        """, tuple(params))
+        rows = cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+def bulk_delete_memories(
+    ids: Optional[List[uuid.UUID]] = None,
+    sources: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+    tags_all: Optional[List[str]] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    importance_min: Optional[float] = None,
+    importance_max: Optional[float] = None,
+) -> int:
+    """Delete memories matching the given filters; return rows deleted.
+
+    At least one filter must be provided — callers pass an empty filter set
+    at their peril, and the handler enforces a `confirm=True` flag.
+    """
+    filters: List[str] = []
+    params: List[Any] = []
+    if ids:
+        filters.append("id = ANY(%s)")
+        params.append([str(i) for i in ids])
+    if sources:
+        filters.append("source = ANY(%s)")
+        params.append(sources)
+    if tags:
+        filters.append("tags && %s")
+        params.append(tags)
+    if tags_all:
+        filters.append("tags @> %s")
+        params.append(tags_all)
+    if date_from:
+        filters.append("created_at >= %s")
+        params.append(date_from)
+    if date_to:
+        filters.append("created_at <= %s")
+        params.append(date_to)
+    if importance_min is not None:
+        filters.append("importance >= %s")
+        params.append(float(importance_min))
+    if importance_max is not None:
+        filters.append("importance <= %s")
+        params.append(float(importance_max))
+
+    if not filters:
+        raise ValueError("bulk_delete_memories requires at least one filter")
+
+    where = " AND ".join(filters)
+    with get_db_cursor() as cursor:
+        cursor.execute(f"DELETE FROM memory WHERE {where}", tuple(params))
+        return cursor.rowcount
+
+
 def get_memories_for_report(
     days: int = 7
 ) -> List[Dict[str, Any]]:
@@ -654,7 +935,7 @@ def get_memories_for_report(
         cursor.execute("""
             SELECT id, source, content, tags, entities, created_at
             FROM memory
-            WHERE created_at >= CURRENT_DATE - INTERVAL '%s days'
+            WHERE created_at >= CURRENT_DATE - make_interval(days => %s)
             ORDER BY created_at DESC
         """, (days,))
         results = cursor.fetchall()

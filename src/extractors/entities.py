@@ -128,14 +128,16 @@ class EntityExtractor:
         except Exception:
             pass
         
-        # Keyword-based extraction
-        words = set(text.lower().split())
-        
-        # Technologies
-        entities['technologies'].update(words & self.tech_keywords)
-        
-        # Projects
-        entities['projects'].update(words & self.project_keywords)
+        # Keyword-based extraction: match whole words so 'python,' / '(python)'
+        # still trigger, and 'java' doesn't match inside 'javascript'. The old
+        # set(text.split()) approach relied on whitespace-only tokenization.
+        lowered = text.lower()
+        for kw in self.tech_keywords:
+            if re.search(rf"\b{re.escape(kw)}\b", lowered):
+                entities['technologies'].add(kw)
+        for kw in self.project_keywords:
+            if re.search(rf"\b{re.escape(kw)}\b", lowered):
+                entities['projects'].add(kw)
         
         # Convert sets to sorted lists
         return {k: sorted(list(v)) for k, v in entities.items()}
