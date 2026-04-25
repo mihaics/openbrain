@@ -3,6 +3,7 @@ Core tests for Open Brain.
 """
 import json
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timedelta
@@ -33,6 +34,39 @@ class TestConfig:
         assert 'embedder' in config
         assert 'mcp' in config
         assert 'tags' in config
+
+
+class TestCLI:
+    """Test CLI entry points."""
+
+    def _run_cli(self, *args):
+        repo_root = os.path.join(os.path.dirname(__file__), '..')
+        return subprocess.run(
+            [sys.executable, '-m', 'src.cli', *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_help_does_not_import_command_modules(self):
+        result = self._run_cli('--help')
+
+        assert result.returncode == 0
+        assert 'search,store,stats,import,report,serve,exec' in result.stdout
+
+    def test_exec_help_includes_sandbox_options(self):
+        result = self._run_cli('exec', '--help')
+
+        assert result.returncode == 0
+        assert '--sandbox' in result.stdout
+        assert '--allow-network' in result.stdout
+
+    def test_exec_direct_runs_command(self):
+        result = self._run_cli('exec', 'printf cli-ok')
+
+        assert result.returncode == 0
+        assert result.stdout == 'cli-ok\n'
 
 
 class TestEntityExtractor:

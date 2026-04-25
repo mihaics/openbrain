@@ -13,6 +13,7 @@ Usage:
 
 import asyncio
 import json
+import shlex
 import uuid
 from datetime import timedelta
 from typing import Optional, Dict, Any, List
@@ -183,7 +184,7 @@ class DockerSandbox:
         timeout: Optional[int] = None
     ) -> ExecutionResult:
         """Run Python code in the sandbox."""
-        return await self.run(f"python3 -c '{code.replace(\"'\", \"'\\\\\")\")}'", timeout=timeout)
+        return await self.run(f"python3 -c {shlex.quote(code)}", timeout=timeout)
     
     def is_available(self) -> bool:
         """Check if Docker is available."""

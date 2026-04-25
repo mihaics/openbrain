@@ -13,6 +13,7 @@ Usage:
 
 import os
 import asyncio
+import shlex
 from datetime import timedelta
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
@@ -166,7 +167,7 @@ class SandboxExecutor:
         Returns:
             ExecutionResult with stdout, stderr
         """
-        return await self.run(f"python3 -c '{code.replace(\"'\", \"'\\\")\")}'", timeout=timeout)
+        return await self.run(f"python3 -c {shlex.quote(code)}", timeout=timeout)
 
 
 class DirectExecutor:
@@ -233,6 +234,14 @@ class DirectExecutor:
                 duration_ms=int((time.time() - start) * 1000),
                 error=str(e)
             )
+
+    async def run_python(
+        self,
+        code: str,
+        timeout: Optional[int] = None
+    ) -> ExecutionResult:
+        """Run Python code directly on the host."""
+        return await self.run(f"python3 -c {shlex.quote(code)}", timeout=timeout)
 
 
 def get_executor(mode: str = "direct", config: SandboxConfig = None) -> Any:

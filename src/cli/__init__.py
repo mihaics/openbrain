@@ -3,16 +3,7 @@ Open Brain CLI.
 Command-line interface for memory operations.
 """
 import argparse
-import json
 import sys
-from typing import Optional
-
-from .search import search_memories_cmd
-from .store import store_memory_cmd
-from .stats import stats_cmd
-from .import_data import import_cmd
-from .report import report_cmd
-from .serve import serve_cmd
 
 
 def main():
@@ -59,6 +50,50 @@ def main():
     serve_parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
     serve_parser.add_argument('--port', '-p', type=int, default=8000, help='Port to bind to')
     serve_parser.add_argument('--reload', action='store_true', help='Auto-reload on changes')
+
+    # Exec command
+    exec_parser = subparsers.add_parser(
+        'exec',
+        help='Run a shell command directly or in the configured sandbox'
+    )
+    exec_parser.add_argument(
+        '--sandbox',
+        '-s',
+        action='store_true',
+        help='Run in OpenSandbox instead of directly on the host'
+    )
+    exec_parser.add_argument(
+        '--timeout',
+        '-t',
+        type=int,
+        default=60,
+        help='Timeout in seconds'
+    )
+    exec_parser.add_argument(
+        '--persist',
+        '-p',
+        action='store_true',
+        help="Keep sandbox state after execution when supported"
+    )
+    exec_parser.add_argument(
+        '--cwd',
+        help='Working directory for execution'
+    )
+    exec_parser.add_argument(
+        '--mount',
+        help='Host path to mount into the sandbox when supported'
+    )
+    exec_parser.add_argument(
+        '--allow-network',
+        choices=['true', 'false'],
+        help='Allow outbound network access in sandbox mode'
+    )
+    exec_parser.add_argument(
+        'exec_command',
+        nargs=argparse.REMAINDER,
+        metavar='COMMAND',
+        help='Command to execute. If omitted, stdin is used.'
+    )
     
     args = parser.parse_args()
     
@@ -68,17 +103,26 @@ def main():
     
     try:
         if args.command == 'search':
+            from .search import search_memories_cmd
             return search_memories_cmd(args)
         elif args.command == 'store':
+            from .store import store_memory_cmd
             return store_memory_cmd(args)
         elif args.command == 'stats':
+            from .stats import stats_cmd
             return stats_cmd(args)
         elif args.command == 'import':
+            from .import_data import import_cmd
             return import_cmd(args)
         elif args.command == 'report':
+            from .report import report_cmd
             return report_cmd(args)
         elif args.command == 'serve':
+            from .serve import serve_cmd
             return serve_cmd(args)
+        elif args.command == 'exec':
+            from .exec_command import exec_cmd
+            return exec_cmd(args)
         else:
             parser.print_help()
             return 1

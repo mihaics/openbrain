@@ -215,6 +215,8 @@ openbrain stats
 openbrain report --days 7
 openbrain import claude_code ~/.claude/sessions --limit 100
 openbrain serve --reload
+openbrain exec "ls -la"
+openbrain exec --sandbox --timeout 120 "python -V"
 ```
 
 ## Configuration

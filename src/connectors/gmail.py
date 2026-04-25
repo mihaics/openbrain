@@ -18,7 +18,7 @@ from ..extractors.tagger import auto_tag
 class GmailConnector:
     """Import emails from Gmail takeout export."""
     
-    def __init__(self, export_path: """Import emails from str):
+    def __init__(self, export_path: str):
         """
         Initialize with path to Gmail takeout export.
         

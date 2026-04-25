@@ -4,12 +4,6 @@ Import command for CLI.
 import sys
 from argparse import Namespace
 
-from ..connectors.telegram import import_telegram
-from ..connectors.whatsapp import import_whatsapp
-from ..connectors.claude_code import import_claude_code
-from ..connectors.gmail import import_gmail
-from ..connectors.file_watcher import import_folder
-
 
 def import_cmd(args: Namespace) -> int:
     """Handle the import command."""
@@ -22,14 +16,19 @@ def import_cmd(args: Namespace) -> int:
     
     try:
         if source == 'telegram':
+            from ..connectors.telegram import import_telegram
             result = import_telegram(path, limit)
         elif source == 'whatsapp':
+            from ..connectors.whatsapp import import_whatsapp
             result = import_whatsapp(path, limit)
         elif source == 'claude_code':
+            from ..connectors.claude_code import import_claude_code
             result = import_claude_code(path, limit)
         elif source == 'gmail':
+            from ..connectors.gmail import import_gmail
             result = import_gmail(path, limit)
         elif source == 'file':
+            from ..connectors.file_watcher import import_folder
             result = import_folder(path)
         else:
             print(f"Unknown source: {source}")

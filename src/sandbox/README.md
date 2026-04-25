@@ -125,6 +125,10 @@ result = await exec_sandbox("pip install untrusted-package")
 # Check if sandbox server is running
 python -m src.sandbox.cli check
 
+# Preferred project CLI
+openbrain exec "ls -la"
+openbrain exec --sandbox --timeout 120 "python -V"
+
 # Run command directly (no sandbox)
 python -m src.sandbox.cli run "ls -la"
 python -m src.sandbox.cli run "pip install requests" --timeout 120
