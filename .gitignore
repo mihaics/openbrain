@@ -38,3 +38,6 @@ Thumbs.db
 
 # Local Codex/session state
 .codex
+
+# Removed legacy Streamlit UI
+.streamlit/
