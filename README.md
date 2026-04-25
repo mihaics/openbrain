@@ -1,434 +1,275 @@
-# 🧠 Open Brain
+# OpenBrain
 
-> Personal semantic memory system with MCP interface. Store, search, and analyze everything that matters to you.
+Personal semantic memory system with three access paths:
 
-[![GitHub Stars](https://img.shields.io/github/stars/benclawbot/open-brain)](https://github.com/benclawbot/open-brain/stargazers)
-[![Docker](https://img.shields.io/docker/pulls/benclawbot/open-brain)](https://hub.docker.com/r/benclawbot/open-brain)
-[![License](https://img.shields.io/github/license/benclawbot/open-brain)](https://github.com/benclawbot/open-brain/blob/master/LICENSE)
+- MCP tools for agents and editors
+- REST API for applications
+- Next.js web UI for browsing, searching, editing, and graphing memories
 
-## What is Open Brain?
+OpenBrain stores memories in PostgreSQL with pgvector embeddings, tags, extracted entities, metadata, and source labels. Search combines PostgreSQL full text with vector similarity when embeddings are available.
 
-Open Brain is a **personal knowledge management system** that acts as your second brain. It:
+## Current Stack
 
-- 📥 **Ingests** data from anywhere (Telegram, WhatsApp, Claude Code, Gmail, files)
-- 🧠 **Embeds** everything semantically (OpenRouter, OpenAI, Ollama, or any custom API)
-- 🔍 **Searches** instantly using vector similarity
-- 📊 **Analyzes** trends, clusters, and connections
-- 🔔 **Notifies** you of important changes
-- 🌐 **Serves** via MCP, REST API, CLI, or Dashboard
+| Layer | Technology |
+| --- | --- |
+| Database | PostgreSQL 16 + pgvector |
+| API | FastAPI |
+| MCP | Python MCP server over stdio |
+| Web | Next.js 16, React 19, Base UI, Cytoscape |
+| CLI | Python argparse entrypoint |
+| Embeddings | Ollama, OpenAI, OpenRouter, or custom OpenAI-compatible API |
 
-Think of it as **Obsidian meets ChatGPT memory** — but accessible from any tool.
+## Repository Layout
 
----
+```text
+.
+├── config/settings.yaml        # Local default configuration
+├── docker-compose.yml          # postgres + api + web
+├── src/
+│   ├── main.py                 # MCP stdio server
+│   ├── api/main.py             # FastAPI app
+│   ├── cli/                    # openbrain CLI commands
+│   ├── db/                     # schema, connection, query layer
+│   ├── embedder/               # embedding providers
+│   ├── extractors/             # entities + auto-tagging
+│   ├── analytics/              # trends and weekly report generation
+│   └── connectors/             # importers for external sources
+├── tests/test_core.py
+└── web/                        # Next.js app
+```
 
-## ✨ Features
+Use `web/` for the UI.
 
-### Core
-- **Semantic Search** — Find memories by meaning, not just keywords
-- **Auto-Tagging** — Automatic topic and entity extraction
-- **Entity Recognition** — Extracts people, places, organizations, dates
-- **Trend Analysis** — See what topics are emerging or declining
+## Quick Start
 
-### Integrations
-- **MCP Server** — Use from Claude, Codex, or any MCP client
-- **REST API** — HTTP access for any application
-- **CLI** — Command-line interface for quick operations
-- **Source Connectors** — Import from Telegram, WhatsApp, Gmail, Claude Code
-
-### UI
-- **Next.js Web App** — Visualize memories, stats, and trends
-- **Weekly Reports** — Automated markdown reports
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- [Docker](https://docker.com) + Docker Compose
-- At least 2GB RAM
-- (Optional) OpenRouter API key for embeddings
-
-### 1. Clone & Configure
+1. Create local environment config:
 
 ```bash
-git clone https://github.com/benclawbot/open-brain.git
-cd open-brain
-
-# Copy environment file
 cp .env.example .env
 ```
 
-### 2. Set Environment Variables
+2. Edit `.env`.
 
-Edit `.env`:
+For local Ollama:
 
 ```env
-# Database
-DB_PASSWORD=your_secure_password
-
-# Embeddings (OpenRouter = FREE)
-OPENROUTER_API_KEY=your_openrouter_key
-
-# Optional: Telegram notifications
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
+EMBEDDER_PROVIDER=ollama
+EMBEDDER_MODEL=nomic-embed-text
+OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 
-> **No API key?** OpenRouter has a free tier. Just sign up at [openrouter.ai](https://openrouter.ai).
+For OpenAI/OpenRouter, set the provider/model and API key instead.
 
-### 3. Start Everything
+3. Start the stack:
 
 ```bash
 docker compose up -d
 ```
 
-### 4. Access Services
+4. Open services:
 
-| Service | URL | Description |
-|---------|-----|-------------|
-| **Web App** | http://localhost:3777 | Next.js UI |
-| **MCP Server** | http://localhost:8080 | MCP protocol |
-| **REST API** | http://localhost:8000 | HTTP API |
-| **API Docs** | http://localhost:8000/docs | Swagger docs |
+| Service | URL |
+| --- | --- |
+| Web UI | `http://localhost:3777` |
+| API | `http://localhost:8000` |
+| API docs | `http://localhost:8000/docs` |
+| Postgres host port | `localhost:5433` |
 
----
+Docker Compose does not expose MCP as an HTTP service. Run the MCP server as a stdio process from your MCP client.
 
-## 🔧 Configuration
+## Local Development
 
-All settings in `config/settings.yaml`:
-
-```yaml
-database:
-  host: postgres
-  port: 5432
-  name: openbrain
-  user: postgres
-  password: ${DB_PASSWORD}
-
-embedder:
-  # Providers: openrouter, openai, ollama, custom
-  provider: openrouter
-  model: text-embedding-3-small
-  dimensions: 768
-
-mcp:
-  host: 0.0.0.0
-  port: 8080
-
-api:
-  host: 0.0.0.0
-  port: 8000
-
-web:
-  port: 3777
-```
-
-### Embedder Providers
-
-| Provider | Env Variable | Notes |
-|----------|-------------|-------|
-| **OpenRouter** (default) | `OPENROUTER_API_KEY` | Free tier available |
-| OpenAI | `OPENAI_API_KEY` | Paid |
-| Ollama | `OLLAMA_BASE_URL` | Local, free |
-| Custom | `CUSTOM_API_URL` + `CUSTOM_API_KEY` | Any OpenAI-compatible |
-
----
-
-## 📡 Usage
-
-### CLI
+Python setup:
 
 ```bash
-# Install
-pip install -e .
-
-# Search memories
-openbrain search "what did I learn about AI"
-
-# Store a memory
-openbrain store "Meeting with Oliver about trading bot" --source telegram --tags ai,trading
-
-# Show stats
-openbrain stats
-
-# Generate weekly report
-openbrain report
-
-# Start API server
-openbrain serve
+python -m venv .venv
+. .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-### MCP Tools
+Run the API locally:
 
-Connect any MCP client to `http://localhost:8080`:
+```bash
+openbrain serve --host 0.0.0.0 --port 8000 --reload
+```
 
-```python
-# Example: Using memory_search
+Run the web app locally:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+The web app defaults to `http://localhost:8000` for the API. Override with:
+
+```bash
+NEXT_PUBLIC_API_BASE=http://localhost:8000 npm run dev
+```
+
+## MCP Usage
+
+The MCP server is `src/main.py` and uses stdio:
+
+```bash
+python -m src.main
+```
+
+Example MCP client config:
+
+```json
 {
-  "name": "memory_search",
-  "arguments": {
-    "query": "trading strategies",
-    "limit": 5,
-    "sources": ["telegram", "claude"]
+  "mcpServers": {
+    "openbrain": {
+      "command": "python",
+      "args": ["-m", "src.main"],
+      "cwd": "/path/to/open-brain"
+    }
   }
 }
 ```
 
-### REST API
+Primary MCP tools include:
+
+| Tool | Purpose |
+| --- | --- |
+| `memory_store` | Store a memory with embedding, entities, and tags |
+| `memory_search` | Hybrid full-text/vector search |
+| `memory_get` | Fetch one memory by ID |
+| `memory_update` | Update content, source, tags, or importance |
+| `memory_update_tags` | Replace tags while preserving tag provenance where possible |
+| `memory_delete` | Delete one memory |
+| `memory_bulk_delete` | Delete by filters, requires `confirm: true` |
+| `memory_get_related` | Find semantically related memories |
+| `memory_find_duplicates` | Find near-duplicate memory pairs |
+| `memory_get_entity` | Find memories containing an entity |
+| `memory_timeline` | Group memories by day |
+| `memory_graph` | Entity co-occurrence graph |
+| `memory_stats` | Aggregate memory stats |
+| `memory_trends` | Trending tags |
+| `memory_weekly_report` | Markdown activity report |
+
+Example tool call:
+
+```json
+{
+  "name": "memory_search",
+  "arguments": {
+    "query": "embedding dimension mismatch",
+    "limit": 10,
+    "include_score": true,
+    "content_mode": "snippet"
+  }
+}
+```
+
+## REST API
+
+Common endpoints:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Health check |
+| `GET` | `/memories` | Recent memories |
+| `POST` | `/memories` | Store a memory |
+| `GET` | `/memories/{id}` | Fetch a memory |
+| `PUT` | `/memories/{id}` | Update a memory |
+| `DELETE` | `/memories/{id}` | Delete a memory |
+| `POST` | `/memories/search` | Search memories |
+| `GET` | `/memories/timeline` | Timeline data |
+| `GET` | `/memories/graph` | Entity graph data |
+| `GET` | `/entities/types` | Entity type counts |
+| `GET` | `/entities/names` | Entity names by type |
+| `GET` | `/stats` | Memory stats |
+| `GET` | `/trends` | Trending topics |
+| `GET` | `/report/weekly` | Weekly report |
+
+Examples:
 
 ```bash
-# Search
-curl -X POST http://localhost:8000/memories/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "AI agents", "limit": 5}'
-
-# Store
 curl -X POST http://localhost:8000/memories \
   -H "Content-Type: application/json" \
-  -d '{"content": "New idea", "source": "manual"}'
-
-# Stats
-curl http://localhost:8000/stats
+  -d '{"content":"Ship README cleanup", "source":"manual", "tags":["docs"]}'
 ```
-
----
-
-## 🏗 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Clients                               │
-│   Claude Code | Codex | OpenClaw | Custom Apps | CLI       │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ MCP / HTTP / CLI
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      Open Brain                              │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │   MCP API   │  │  REST API   │  │     CLI Tools    │   │
-│  └─────────────┘  └──────────────┘  └──────────────────┘   │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │              Application Layer                          │ │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐  │ │
-│  │  │Extractors│ │  Tagger  │ │Analytics │ │ Notifier │  │ │
-│  │  │ (Entities│ │ (Auto-tag│ │ (Trends) │ │(Telegram)│  │ │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘  │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │              Embedder (Multi-Provider)                  │ │
-│  │   OpenRouter | OpenAI | Ollama | Custom                 │ │
-│  └─────────────────────────────────────────────────────────┘ │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│                   PostgreSQL + pgvector                      │
-│   memory table with vector embeddings, GIN indexes          │
-│   for tags/entities, IVFFlat for similarity search          │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Components
-
-| Component | Technology | Purpose |
-|-----------|------------|---------|
-| Database | PostgreSQL + pgvector | Storage + vector search |
-| MCP Server | FastMCP | Tool interface for AI agents |
-| REST API | FastAPI | HTTP access |
-| CLI | Click | Terminal commands |
-| Web App | Next.js + Base UI | Visual UI |
-| Embedder | requests | Multi-provider embeddings |
-| Extractors | NLTK/spaCy | Entity extraction |
-
----
-
-## 📁 Project Structure
-
-```
-open-brain/
-├── config/
-│   └── settings.yaml          # Configuration
-├── src/
-│   ├── main.py                # MCP server entry
-│   ├── db/                    # Database layer
-│   │   ├── schema.sql
-│   │   ├── connection.py
-│   │   └── queries.py
-│   ├── embedder/              # Multi-provider embeddings
-│   ├── extractors/            # NER + tagging
-│   ├── analytics/             # Trends + reports
-│   ├── connectors/            # Source importers
-│   ├── cli/                   # CLI commands
-│   ├── api/                   # REST API
-│   ├── notifications/         # Telegram + email
-│   └── ingestion/             # Bulk import
-├── web/                       # Next.js web app
-├── scripts/
-│   ├── setup_db.py            # Database setup
-│   ├── backup.sh              # Automated backups
-│   └── healthcheck.sh         # Health monitoring
-├── tests/
-│   └── test_core.py
-├── docker-compose.yml         # Full stack
-├── Dockerfile                 # App container
-├── pyproject.toml             # CLI package
-├── requirements.txt           # Python deps
-└── README.md
-```
-
----
-
-## 🔌 Source Connectors
-
-### Telegram
-
-```python
-from src.connectors.telegram import TelegramImporter
-
-importer = TelegramImporter(
-    export_file="telegram_export.json"
-)
-importer.import_all(db_conn)
-```
-
-### WhatsApp
-
-```python
-from src.connectors.whatsapp import WhatsAppImporter
-
-importer = WhatsAppImporter(
-    export_file="whatsapp_chat.txt"
-)
-importer.import_all(db_conn)
-```
-
-### Claude Code
-
-```python
-from src.connectors.claude_code import ClaudeCodeImporter
-
-importer = ClaudeCodeImporter(
-    sessions_path="~/.claude/sessions"
-)
-importer.import_all(db_conn)
-```
-
-### Gmail
-
-```python
-from src.connectors.gmail import GmailImporter
-
-importer = GmailImporter(
-    takeout_path="./mail"
-)
-importer.import_all(db_conn)
-```
-
----
-
-## 📊 Analytics
-
-### Trend Detection
-
-Automatically detects:
-- **Emerging topics** — Tags increasing >50% vs baseline
-- **Declining topics** — Tags dropping >30%
-- **New entities** — People/places appearing for first time
-- **Co-occurrence** — Topics that appear together
-
-### Weekly Reports
-
-Generated every Sunday via cron:
-
-```markdown
-# Weekly Memory Report
-
-### Activity
-- New memories: 47
-- By source: telegram: 23, claude: 15, manual: 9
-
-### What's Hot
-- ai: +200% (15 mentions)
-- trading: +50% (8 mentions)
-
-### Insights
-- You're researching AI agents heavily this week
-- Oliver appeared 5 times — significant collaboration
-```
-
----
-
-## 🔔 Notifications
-
-### Telegram Alerts
-
-- New emerging trends
-- Weekly reports
-- Memory stats summaries
-
-### Email
-
-- Daily digests
-- Weekly reports
-- Anomaly alerts
-
----
-
-## 🐳 Docker Services
-
-| Service | Image | Ports |
-|---------|-------|-------|
-| postgres | pgvector/pgvector:0.5.1 | 5432 |
-| api | benclawbot/open-brain | 8000 |
-| web | local Next.js image | 3777 |
-| mcp | benclawbot/open-brain | 8080 |
-
----
-
-## 🤖 Phone Installation (ARM)
-
-For running on an old Android phone converted to Linux:
 
 ```bash
-# Use ARM-compatible images
-docker-compose -f docker-compose.arm.yml up -d
-
-# Or build locally on phone
-docker build --platform=linux/arm64 .
+curl -X POST http://localhost:8000/memories/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"README cleanup", "limit":5}'
 ```
 
-Resources: ~500MB RAM, ~1GB storage
+## CLI
 
----
-
-## 🧪 Testing
+Install the package in editable mode first:
 
 ```bash
-# Run tests
-pytest tests/
-
-# Test MCP connection
-python -c "from src.main import mcp; print(mcp)"
+pip install -e .
 ```
 
----
+Commands:
 
-## 📝 License
+```bash
+openbrain store "Remember this" --source cli --tag note
+openbrain search "remember this" --limit 5
+openbrain stats
+openbrain report --days 7
+openbrain import claude_code ~/.claude/sessions --limit 100
+openbrain serve --reload
+```
 
-MIT License — do whatever you want with it.
+## Configuration
 
----
+Main config lives in `config/settings.yaml`. `.env` is for local secrets and runtime overrides and is intentionally ignored by Git.
 
-## 🙏 Acknowledgments
+Important environment variables:
 
-- [pgvector](https://github.com/pgvector/pgvector) — Vector similarity for PostgreSQL
-- [FastMCP](https://github.com/jlowin/fastmcp) — MCP framework
-- [OpenRouter](https://openrouter.ai) — Free embedding API
+| Variable | Purpose |
+| --- | --- |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | Database connection |
+| `EMBEDDER_PROVIDER` | `ollama`, `openai`, `openrouter`, or `custom` |
+| `EMBEDDER_MODEL` | Embedding model name |
+| `OLLAMA_BASE_URL` | Ollama endpoint |
+| `OPENAI_API_KEY` | OpenAI embeddings |
+| `OPENROUTER_API_KEY` | OpenRouter embeddings |
+| `CUSTOM_API_URL`, `CUSTOM_API_KEY` | Custom OpenAI-compatible embeddings |
+| `API_PORT` | API port, default `8000` |
+| `WEB_PORT` | Web port, default `3777` |
 
----
+## Database
 
-## 🔗 Links
+Schema is in `src/db/schema.sql`.
 
-- [GitHub](https://github.com/benclawbot/open-brain)
-- [Report Issues](https://github.com/benclawbot/open-brain/issues)
-- [Discussions](https://github.com/benclawbot/open-brain/discussions)
+The `memory` table stores:
+
+- `content` and optional `raw_content`
+- vector `embedding`
+- JSONB `entities`, JSONB `metadata`, JSONB `tag_sources`
+- text array `tags`
+- `source`, `source_id`, `importance`, timestamps, and language
+
+Indexes include pgvector HNSW for embeddings, GIN for tags/entities, and full-text search over content.
+
+## Testing
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+Current expected result:
+
+```text
+43 passed
+```
+
+Useful checks:
+
+```bash
+docker compose config
+git diff --check
+```
+
+## Notes
+
+- `.env`, virtualenvs, Python caches, build output, and Node dependencies are ignored.
+- The committed web app is regular source under `web/`; it is not a nested Git repository.
+- If embeddings fail, memories are still stored and can be found by text search.
