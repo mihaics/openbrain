@@ -19,7 +19,7 @@ export default function TimelinePage() {
     ? `${jumpDate}T23:59:59`
     : format(new Date(), "yyyy-MM-dd'T'HH:mm:ss");
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["timeline", fromDate, toDate],
     queryFn: () => api.timeline(fromDate, toDate),
   });
@@ -28,9 +28,9 @@ export default function TimelinePage() {
   const sortedDays = Object.keys(days).sort().reverse();
 
   return (
-    <div className="flex h-[calc(100vh-48px)]">
-      <div className={`flex-1 overflow-y-auto pr-4 ${selected ? "mr-[480px]" : ""}`}>
-        <div className="flex items-center justify-between mb-4">
+    <div className="flex h-[calc(100dvh-88px)] lg:h-[calc(100vh-48px)]">
+      <div className={`flex-1 overflow-y-auto lg:pr-4 ${selected ? "lg:mr-[480px]" : ""}`}>
+        <div className="flex flex-col gap-3 mb-4 sm:flex-row sm:items-center sm:justify-between">
           <h1 className="text-xl font-semibold">Timeline</h1>
           <div className="flex items-center gap-3">
             <label className="text-[11px] text-zinc-500">Jump to date</label>
@@ -38,6 +38,12 @@ export default function TimelinePage() {
           </div>
         </div>
         {isLoading && <p className="text-sm text-zinc-500">Loading...</p>}
+        {isError && (
+          <div className="mb-3 flex items-center justify-between rounded-md border border-red-900/70 bg-red-950/30 px-3 py-2 text-sm text-red-200">
+            <span>Timeline failed to load.</span>
+            <button className="text-red-100 underline underline-offset-4" onClick={() => refetch()}>Retry</button>
+          </div>
+        )}
         <div className="space-y-6">
           {sortedDays.map((day) => (
             <div key={day}>
@@ -51,6 +57,7 @@ export default function TimelinePage() {
             </div>
           ))}
         </div>
+        {!isLoading && !isError && sortedDays.length === 0 && <p className="text-sm text-zinc-500">No memories in this date range.</p>}
         {data?.has_more && !jumpDate && (
           <button onClick={() => setDaysBack((d) => d + 7)}
             className="mt-4 w-full py-2 text-sm text-zinc-500 hover:text-zinc-300 border border-zinc-800 rounded-md">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState, useEffect } from "react";
+import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,11 +9,28 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Save } from "lucide-react";
 
 export default function SettingsPage() {
-  const queryClient = useQueryClient();
-  const { data: settings, isLoading } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
-  const [form, setForm] = useState<Record<string, Record<string, unknown>>>({});
+  const { data: settings, isLoading, isError, refetch } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 
-  useEffect(() => { if (settings) setForm(settings as Record<string, Record<string, unknown>>); }, [settings]);
+  if (isLoading) return <p className="text-sm text-zinc-500">Loading settings...</p>;
+  if (isError) {
+    return (
+      <div className="max-w-2xl">
+        <h1 className="text-xl font-semibold mb-6">Settings</h1>
+        <div className="flex items-center justify-between rounded-md border border-red-900/70 bg-red-950/30 px-3 py-2 text-sm text-red-200">
+          <span>Settings failed to load.</span>
+          <button className="text-red-100 underline underline-offset-4" onClick={() => refetch()}>Retry</button>
+        </div>
+      </div>
+    );
+  }
+
+  return <SettingsForm key={JSON.stringify(settings ?? {})} initialSettings={(settings ?? {}) as Record<string, Record<string, unknown>>} />;
+}
+
+function SettingsForm({ initialSettings }: { initialSettings: Record<string, Record<string, unknown>> }) {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState<Record<string, Record<string, unknown>>>(initialSettings);
+  const isDirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(initialSettings), [form, initialSettings]);
 
   const mutation = useMutation({
     mutationFn: (s: Record<string, unknown>) => api.saveSettings(s),
@@ -23,8 +40,6 @@ export default function SettingsPage() {
   const update = (section: string, key: string, value: unknown) => {
     setForm((prev) => ({ ...prev, [section]: { ...(prev[section] ?? {}), [key]: value } }));
   };
-
-  if (isLoading) return <p className="text-sm text-zinc-500">Loading settings...</p>;
 
   const db = (form.database ?? {}) as Record<string, unknown>;
   const emb = (form.embedder ?? {}) as Record<string, unknown>;
@@ -36,7 +51,7 @@ export default function SettingsPage() {
         <h2 className="text-sm font-medium text-zinc-400 mb-3">Database</h2>
         <div className="grid grid-cols-2 gap-3">
           <div><label className="text-[11px] text-zinc-500">Host</label><Input value={(db.host as string) ?? ""} onChange={(e) => update("database", "host", e.target.value)} className="mt-1" /></div>
-          <div><label className="text-[11px] text-zinc-500">Port</label><Input type="number" value={(db.port as number) ?? 5432} onChange={(e) => update("database", "port", parseInt(e.target.value))} className="mt-1" /></div>
+          <div><label className="text-[11px] text-zinc-500">Port</label><Input type="number" value={(db.port as number) ?? 5432} onChange={(e) => update("database", "port", Number.parseInt(e.target.value, 10) || 5432)} className="mt-1" /></div>
           <div><label className="text-[11px] text-zinc-500">Name</label><Input value={(db.name as string) ?? ""} onChange={(e) => update("database", "name", e.target.value)} className="mt-1" /></div>
           <div><label className="text-[11px] text-zinc-500">User</label><Input value={(db.user as string) ?? ""} onChange={(e) => update("database", "user", e.target.value)} className="mt-1" /></div>
         </div>
@@ -58,10 +73,11 @@ export default function SettingsPage() {
           <div><label className="text-[11px] text-zinc-500">Model</label><Input value={(emb.model as string) ?? ""} onChange={(e) => update("embedder", "model", e.target.value)} className="mt-1" /></div>
         </div>
       </section>
-      <Button onClick={() => mutation.mutate(form)} disabled={mutation.isPending}>
+      <Button onClick={() => mutation.mutate(form)} disabled={mutation.isPending || !isDirty}>
         <Save className="h-4 w-4 mr-2" />{mutation.isPending ? "Saving..." : "Save Settings"}
       </Button>
       {mutation.isSuccess && <p className="mt-2 text-sm text-green-500">Saved! Restart services to apply.</p>}
+      {mutation.isError && <p className="mt-2 text-sm text-red-500">Could not save settings.</p>}
     </div>
   );
 }

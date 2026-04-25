@@ -18,9 +18,9 @@ export function MemoryCard({ memory, onClick }: { memory: Memory; onClick?: () =
 
   return (
     <button onClick={onClick}
-      className="w-full text-left p-4 rounded-lg border border-zinc-800 hover:border-zinc-600 bg-zinc-900/50 hover:bg-zinc-900 transition-colors">
-      <p className="text-sm text-zinc-300 line-clamp-2">{memory.content}</p>
-      <div className="mt-2 flex items-center gap-2 flex-wrap">
+      className="w-full max-w-full overflow-hidden text-left p-4 rounded-lg border border-zinc-800 hover:border-zinc-600 bg-zinc-900/50 hover:bg-zinc-900 transition-colors">
+      <p className="text-sm text-zinc-300 line-clamp-2 break-words">{memory.content}</p>
+      <div className="mt-2 flex min-w-0 items-center gap-2 flex-wrap">
         <Badge variant="outline" className={sourceColors[memory.source] ?? "bg-zinc-800/50 text-zinc-400 border-zinc-700"}>
           {memory.source}
         </Badge>
@@ -28,7 +28,7 @@ export function MemoryCard({ memory, onClick }: { memory: Memory; onClick?: () =
           <Badge key={tag} variant="secondary" className="text-[11px] bg-zinc-800 text-zinc-400">{tag}</Badge>
         ))}
         {memory.tags.length > 4 && <span className="text-[11px] text-zinc-600">+{memory.tags.length - 4}</span>}
-        <span className="ml-auto text-[11px] text-zinc-600">{date}</span>
+        <span className="w-full text-[11px] text-zinc-600 sm:ml-auto sm:w-auto">{date}</span>
       </div>
     </button>
   );

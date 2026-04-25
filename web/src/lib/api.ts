@@ -48,6 +48,13 @@ export interface Stats {
 }
 
 export const api = {
+  recent: (limit = 25, offset = 0, source?: string) => {
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    if (source) params.set("source", source);
+    return apiFetch<Memory[]>(`/memories?${params}`);
+  },
   search: (params: SearchParams) =>
     apiFetch<Memory[]>("/memories/search", { method: "POST", body: JSON.stringify(params) }),
   getMemory: (id: string) => apiFetch<Memory>(`/memories/${id}`),

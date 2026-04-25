@@ -13,6 +13,8 @@ export function QuickCapture({ open, onOpenChange }: { open: boolean; onOpenChan
     mutationFn: (content: string) => api.createMemory(content, "web"),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["stats"] });
+      queryClient.invalidateQueries({ queryKey: ["recent"] });
+      queryClient.invalidateQueries({ queryKey: ["timeline"] });
       setValue("");
       onOpenChange(false);
     },

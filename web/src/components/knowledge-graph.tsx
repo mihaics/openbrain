@@ -50,7 +50,9 @@ export function KnowledgeGraph({ data, onNodeClick }: {
         { selector: "node", style: {
           label: "data(label)", "background-color": "data(color)" as unknown as string,
           width: "data(size)" as unknown as number, height: "data(size)" as unknown as number,
-          "font-size": "10px", color: "#d4d4d8",
+          "font-size": "9px", color: "#d4d4d8",
+          "min-zoomed-font-size": 7 as unknown as string, "text-max-width": 80 as unknown as string, "text-wrap": "ellipsis" as const,
+          "text-outline-color": "#09090b", "text-outline-width": 2 as unknown as string,
           "text-valign": "bottom" as const, "text-margin-y": 5, "overlay-opacity": 0,
         }},
         { selector: "edge", style: {
