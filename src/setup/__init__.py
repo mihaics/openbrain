@@ -156,8 +156,8 @@ def run_setup() -> Dict[str, Any]:
         'port': int(prompt_env("MCP_PORT", "8080")),
     }
     
-    config['dashboard'] = {
-        'port': int(prompt_env("DASHBOARD_PORT", "8501")),
+    config['web'] = {
+        'port': int(prompt_env("WEB_PORT", "3777")),
     }
     
     # ═══════════════════════════════════════════════════════
@@ -233,8 +233,8 @@ def run_setup() -> Dict[str, Any]:
             f.write("# Open Brain Environment Variables\n")
             f.write("# Copy this to .env and fill in remaining values\n\n")
             for key in ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD',
-                       'API_PORT', 'MCP_PORT', 'DASHBOARD_PORT', 'SECURITY_MODE']:
-                f.write(f"{key}={config.get(key.split('_')[0].lower(), {}).get(key, '') if key in ['API_PORT', 'MCP_PORT', 'DASHBOARD_PORT'] else ''}\n")
+                       'API_PORT', 'MCP_PORT', 'WEB_PORT', 'SECURITY_MODE']:
+                f.write(f"{key}={config.get(key.split('_')[0].lower(), {}).get(key, '') if key in ['API_PORT', 'MCP_PORT', 'WEB_PORT'] else ''}\n")
             f.write("\n# API Keys\n")
             f.write("\n".join(env_vars))
         
@@ -247,7 +247,7 @@ def run_setup() -> Dict[str, Any]:
 ║  Next steps:                                              ║
 ║  1. Review config/settings.yaml                         ║
 ║  2. docker compose up -d                                ║
-║  3. Visit http://localhost:8501                        ║
+║  3. Visit http://localhost:3777                        ║
 ╚═══════════════════════════════════════════════════════════════╝
     """)
     

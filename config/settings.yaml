@@ -1,13 +1,13 @@
 database:
-  host: postgres
-  port: 5432
+  host: localhost
+  port: 5433
   name: openbrain
-  user: postgres
-  password: openbrain
+  user: openbrain
+  password: openbrain_local
 
 embedder:
-  provider: openrouter
-  model: text-embedding-3-small
+  provider: ollama
+  model: nomic-embed-text
   dimensions: 768
 
 mcp:
@@ -20,8 +20,8 @@ api:
   cors_origins:
     - "*"
 
-dashboard:
-  port: 8501
+web:
+  port: 3777
 
 tags:
   deny_list:

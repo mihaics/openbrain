@@ -36,7 +36,7 @@ Think of it as **Obsidian meets ChatGPT memory** — but accessible from any too
 - **Source Connectors** — Import from Telegram, WhatsApp, Gmail, Claude Code
 
 ### UI
-- **Streamlit Dashboard** — Visualize memories, stats, and trends
+- **Next.js Web App** — Visualize memories, stats, and trends
 - **Weekly Reports** — Automated markdown reports
 
 ---
@@ -87,7 +87,7 @@ docker compose up -d
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| **Dashboard** | http://localhost:8501 | Streamlit UI |
+| **Web App** | http://localhost:3777 | Next.js UI |
 | **MCP Server** | http://localhost:8080 | MCP protocol |
 | **REST API** | http://localhost:8000 | HTTP API |
 | **API Docs** | http://localhost:8000/docs | Swagger docs |
@@ -120,8 +120,8 @@ api:
   host: 0.0.0.0
   port: 8000
 
-dashboard:
-  port: 8501
+web:
+  port: 3777
 ```
 
 ### Embedder Providers
@@ -236,7 +236,7 @@ curl http://localhost:8000/stats
 | MCP Server | FastMCP | Tool interface for AI agents |
 | REST API | FastAPI | HTTP access |
 | CLI | Click | Terminal commands |
-| Dashboard | Streamlit | Visual UI |
+| Web App | Next.js + Base UI | Visual UI |
 | Embedder | requests | Multi-provider embeddings |
 | Extractors | NLTK/spaCy | Entity extraction |
 
@@ -262,8 +262,7 @@ open-brain/
 │   ├── api/                   # REST API
 │   ├── notifications/         # Telegram + email
 │   └── ingestion/             # Bulk import
-├── ui/
-│   └── dashboard.py           # Streamlit dashboard
+├── web/                       # Next.js web app
 ├── scripts/
 │   ├── setup_db.py            # Database setup
 │   ├── backup.sh              # Automated backups
@@ -381,7 +380,7 @@ Generated every Sunday via cron:
 |---------|-------|-------|
 | postgres | pgvector/pgvector:0.5.1 | 5432 |
 | api | benclawbot/open-brain | 8000 |
-| dashboard | benclawbot/open-brain | 8501 |
+| web | local Next.js image | 3777 |
 | mcp | benclawbot/open-brain | 8080 |
 
 ---

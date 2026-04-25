@@ -317,9 +317,15 @@ class OllamaEmbedder(BaseEmbedder):
             timeout=30
         )
         response.raise_for_status()
-        
+
         result = response.json()
-        return result.get('embedding', [])
+        embedding = result.get('embedding')
+        if not embedding:
+            raise RuntimeError(
+                f"Ollama returned empty embedding for model '{self.model}'. "
+                f"Check that the model is pulled and serving."
+            )
+        return embedding
     
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         embeddings = []

@@ -1,6 +1,7 @@
 """
 Core tests for Open Brain.
 """
+import json
 import os
 import sys
 import uuid
@@ -237,6 +238,10 @@ class TestSerialization:
         out = _serialize_memory(self._sample(), content_mode='full', content_max_chars=10)
         assert len(out['content']) <= 11
 
+    def test_content_options_clamp_bad_max_chars(self):
+        from main import _content_opts
+        assert _content_opts({'content_max_chars': -100})['content_max_chars'] == 1
+
     def test_tag_sources_opt_in(self):
         from main import _serialize_memory
         default = _serialize_memory(self._sample())
@@ -347,6 +352,34 @@ class TestDatabaseQueries:
         assert 'tags && %s' in args[0]
         assert 'importance >= %s' in args[0]
 
+    @patch('db.queries.get_db_cursor')
+    def test_memory_read_paths_decode_tag_sources(self, mock_cursor):
+        """Opt-in provenance should work consistently for all memory read paths."""
+        from db import queries
+
+        mock_ctx = Mock()
+        mock_ctx.__enter__ = Mock(return_value=mock_ctx)
+        mock_ctx.__exit__ = Mock(return_value=False)
+        mock_cursor.return_value = mock_ctx
+        mock_ctx.fetchall.return_value = [{
+            'id': uuid.uuid4(),
+            'source': 'test',
+            'content': 'hello',
+            'entities': '{"people": ["Ada"]}',
+            'tags': ['x'],
+            'tag_sources': '{"x": "user"}',
+            'metadata': '{"k": "v"}',
+            'importance': 0.5,
+            'created_at': datetime.now(),
+            'original_date': None,
+            'language': None,
+        }]
+
+        memories = queries.get_today_memories()
+        assert memories[0]['entities'] == {'people': ['Ada']}
+        assert memories[0]['tag_sources'] == {'x': 'user'}
+        assert memories[0]['metadata'] == {'k': 'v'}
+
 
 class TestBulkDelete:
     """Regression tests for memory_bulk_delete safety + composition."""
@@ -390,6 +423,28 @@ class TestBulkDelete:
         sql_text, params = mock_ctx.execute.call_args[0]
         assert "id = ANY(%s::uuid[])" in sql_text
         assert params == ([str(i) for i in ids],)
+
+    def test_bulk_delete_handler_requires_boolean_true_confirm(self):
+        import asyncio as _asyncio
+        from main import handle_memory_bulk_delete
+
+        result = _asyncio.run(handle_memory_bulk_delete({
+            'confirm': 'true',
+            'sources': ['mcp'],
+        }))
+        payload = json.loads(result[0].text)
+        assert payload['error'] == 'memory_bulk_delete requires confirm=true'
+
+
+class TestMcpArgumentValidation:
+    def test_string_list_rejects_scalar(self):
+        from main import _string_list
+        with pytest.raises(ValueError):
+            _string_list('mcp', 'sources')
+
+    def test_string_list_strips_and_drops_empty_items(self):
+        from main import _string_list
+        assert _string_list([' mcp ', '', 'manual'], 'sources') == ['mcp', 'manual']
 
 
 class TestFindDuplicates:
@@ -497,6 +552,8 @@ class TestMcpToolSurface:
         assert by_name["memory_delete"].annotations.destructiveHint is True
         assert by_name["memory_bulk_delete"].annotations.destructiveHint is True
         assert by_name["memory_search"].annotations.readOnlyHint is True
+        assert by_name["memory_today"].annotations.readOnlyHint is True
+        assert by_name["memory_weekly_report"].annotations.readOnlyHint is True
 
         # Entity-type enums should list the canonical types.
         et = by_name["memory_get_entity"].inputSchema["properties"]["entity_type"]

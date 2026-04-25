@@ -16,25 +16,18 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
     ports:
     - 8000:8000
-  dashboard:
-    build: .
-    command: streamlit run ui/dashboard.py --server.port=8501 --server.address=0.0.0.0
-    container_name: openbrain-dashboard
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_BASE: http://localhost:8000
+    container_name: openbrain-web
     depends_on:
-    - postgres
-    env_file:
-    - .env
+    - api
     environment:
-      DB_HOST: postgres
-      DB_NAME: openbrain
-      DB_PASSWORD: openbrain
-      DB_PORT: 5432
-      DB_USER: postgres
-      STREAMLIT_PORT: 8501
+      NEXT_PUBLIC_API_BASE: http://localhost:8000
     ports:
-    - 8501:8501
-    volumes:
-    - ./.streamlit:/root/.streamlit
+    - 3777:3777
   postgres:
     container_name: openbrain-postgres
     environment:

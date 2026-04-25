@@ -6,10 +6,29 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from psycopg2 import sql
-from psycopg2.extras import RealDictCursor
-
 from .connection import get_db_cursor, get_vector_dim
+
+
+JSON_MEMORY_FIELDS = ("entities", "metadata", "tag_sources")
+
+
+def _decode_json_field(value: Any) -> Any:
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _decode_memory_row(row: Any) -> Dict[str, Any]:
+    """Normalize DB/mocked rows into a consistent memory-record dict."""
+    mem = dict(row)
+    for field in JSON_MEMORY_FIELDS:
+        if field in mem:
+            mem[field] = _decode_json_field(mem.get(field)) or {}
+    return mem
+
+
+def _decode_memory_rows(rows: List[Any]) -> List[Dict[str, Any]]:
+    return [_decode_memory_row(row) for row in rows]
 
 
 def _validate_embedding_dim(embedding: Optional[List[float]]) -> Optional[List[float]]:
@@ -275,13 +294,7 @@ def search_memories(
 
     memories = []
     for row in results:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        if isinstance(mem.get('metadata'), str):
-            mem['metadata'] = json.loads(mem['metadata'])
-        if isinstance(mem.get('tag_sources'), str):
-            mem['tag_sources'] = json.loads(mem['tag_sources'])
+        mem = _decode_memory_row(row)
         mem['score'] = float(row.get('score', 0))
         memories.append(mem)
 
@@ -301,14 +314,7 @@ def get_memory_by_id(memory_id: uuid.UUID) -> Optional[Dict[str, Any]]:
         row = cursor.fetchone()
 
     if row:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        if isinstance(mem.get('metadata'), str):
-            mem['metadata'] = json.loads(mem['metadata'])
-        if isinstance(mem.get('tag_sources'), str):
-            mem['tag_sources'] = json.loads(mem['tag_sources'])
-        return mem
+        return _decode_memory_row(row)
     return None
 
 
@@ -427,13 +433,7 @@ def get_related_memories(
 
     memories = []
     for row in results:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        if isinstance(mem.get('metadata'), str):
-            mem['metadata'] = json.loads(mem['metadata'])
-        if isinstance(mem.get('tag_sources'), str):
-            mem['tag_sources'] = json.loads(mem['tag_sources'])
+        mem = _decode_memory_row(row)
         mem['score'] = float(row.get('score', 0))
         memories.append(mem)
     return memories
@@ -457,16 +457,7 @@ def get_memories_by_entity(
         """, (entity_type, entity_name, limit))
         results = cursor.fetchall()
     
-    memories = []
-    for row in results:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        if isinstance(mem.get('metadata'), str):
-            mem['metadata'] = json.loads(mem['metadata'])
-        memories.append(mem)
-    
-    return memories
+    return _decode_memory_rows(results)
 
 
 def get_today_memories(limit: int = 10) -> List[Dict[str, Any]]:
@@ -483,16 +474,7 @@ def get_today_memories(limit: int = 10) -> List[Dict[str, Any]]:
         """, (limit,))
         results = cursor.fetchall()
     
-    memories = []
-    for row in results:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        if isinstance(mem.get('metadata'), str):
-            mem['metadata'] = json.loads(mem['metadata'])
-        memories.append(mem)
-    
-    return memories
+    return _decode_memory_rows(results)
 
 
 def get_memory_stats() -> Dict[str, Any]:
@@ -642,18 +624,7 @@ def get_recent_memories(
         
         results = cursor.fetchall()
     
-    memories = []
-    for row in results:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        if isinstance(mem.get('metadata'), str):
-            mem['metadata'] = json.loads(mem['metadata'])
-        if isinstance(mem.get('tag_sources'), str):
-            mem['tag_sources'] = json.loads(mem['tag_sources'])
-        memories.append(mem)
-    
-    return memories
+    return _decode_memory_rows(results)
 
 
 def get_timeline_memories(
@@ -696,13 +667,7 @@ def get_timeline_memories(
     days: Dict[str, list] = {}
     day_counts: Dict[str, int] = {}
     for row in results:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        if isinstance(mem.get('metadata'), str):
-            mem['metadata'] = json.loads(mem['metadata'])
-        if isinstance(mem.get('tag_sources'), str):
-            mem['tag_sources'] = json.loads(mem['tag_sources'])
+        mem = _decode_memory_row(row)
         day_key = str(mem.pop('day'))
         day_counts.setdefault(day_key, 0)
         day_counts[day_key] += 1
@@ -751,15 +716,7 @@ def get_entity_memories(entity_type: str, entity_name: str, limit: int = 20) -> 
         """, (entity_type, entity_name, limit))
         results = cursor.fetchall()
 
-    memories = []
-    for row in results:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        if isinstance(mem.get('metadata'), str):
-            mem['metadata'] = json.loads(mem['metadata'])
-        memories.append(mem)
-    return memories
+    return _decode_memory_rows(results)
 
 
 def get_entity_graph(
@@ -942,11 +899,4 @@ def get_memories_for_report(
         """, (days,))
         results = cursor.fetchall()
     
-    memories = []
-    for row in results:
-        mem = dict(row)
-        if isinstance(mem.get('entities'), str):
-            mem['entities'] = json.loads(mem['entities'])
-        memories.append(mem)
-    
-    return memories
+    return _decode_memory_rows(results)

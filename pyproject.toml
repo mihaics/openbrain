@@ -30,9 +30,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
-    "streamlit>=1.31.0",
     "pandas>=2.2.0",
-    "matplotlib>=3.8.0",
+    "mcp[cli]>=1.1.0",
     "requests>=2.31.0",
     "httpx>=0.26.0",
     "pydantic>=2.5.0",
@@ -52,7 +51,7 @@ openbrain = "src.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*", "config*", "ui*", "scripts*"]
+include = ["src*", "config*", "scripts*"]
 
 [tool.setuptools.package-data]
 config = ["*.yaml", "*.yml"]

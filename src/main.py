@@ -68,6 +68,7 @@ CONTENT_ARGS_DOC = {
     "content_max_chars": {
         "type": "integer",
         "description": "Cap content length (snippet mode defaults to 240 if unset). Applies to 'full' and 'snippet' modes.",
+        "minimum": 1,
     },
     "include_tag_sources": {
         "type": "boolean",
@@ -86,6 +87,9 @@ CONTENT_ARGS_DOC = {
     },
 }
 
+def _read_only() -> ToolAnnotations:
+    return ToolAnnotations(readOnlyHint=True, idempotentHint=True)
+
 
 def _content_opts(args: Dict) -> Dict[str, Any]:
     """Pull the shared content/tag-source options out of a handler's args."""
@@ -97,6 +101,8 @@ def _content_opts(args: Dict) -> Dict[str, Any]:
         max_chars = int(max_chars) if max_chars is not None else None
     except (TypeError, ValueError):
         max_chars = None
+    if max_chars is not None:
+        max_chars = max(1, max_chars)
     return {
         "content_mode": mode,
         "content_max_chars": max_chars,
@@ -153,6 +159,8 @@ app = Server("openbrain")
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
+    if not isinstance(value, str):
+        raise ValueError("date values must be ISO 8601 strings")
     return datetime.fromisoformat(value)
 
 
@@ -171,6 +179,36 @@ def _clamp_importance(v: Any, *, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return max(0.0, min(1.0, f))
+
+
+def _string_list(value: Any, field: str) -> Optional[List[str]]:
+    """Validate array-of-string MCP args before they hit psycopg2/tagging."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be an array of strings")
+    out: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field} must contain only strings")
+        item = item.strip()
+        if item:
+            out.append(item)
+    return out
+
+
+def _dict_arg(value: Any, field: str) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    return value
+
+
+def _require_entity_type(value: Any) -> str:
+    if not isinstance(value, str) or value not in ENTITY_TYPES:
+        raise ValueError(f"entity_type must be one of: {', '.join(ENTITY_TYPES)}")
+    return value
 
 
 def _json(payload: Any) -> List[TextContent]:
@@ -197,6 +235,7 @@ def _apply_content_mode(
         cap = max_chars if max_chars is not None else 240
     else:
         cap = max_chars if max_chars is not None else len(content)
+    cap = max(1, cap)
     if len(content) > cap:
         return content[:cap].rstrip() + "…"
     return content
@@ -275,13 +314,13 @@ async def list_tools() -> List[Tool]:
                 "vector-only when only one signal is available. "
                 f"Returns a list of memory records {MEMORY_RECORD_SHAPE}."
             ),
-            annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Text search query"},
                     "limit": {"type": "integer", "description": "Max results (1-200, default 10)", "default": 10, "minimum": 1, "maximum": 200},
-                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Filter by source values (e.g. claude-code, manual, dashboard, mcp)"},
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Filter by source values (e.g. claude-code, manual, web, mcp)"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by tags: OR semantics — memory must contain any of these"},
                     "tags_all": {"type": "array", "items": {"type": "string"}, "description": "Filter by tags: AND semantics — memory must contain all of these"},
                     "date_from": {"type": "string", "description": "From date (ISO 8601, e.g. '2026-04-01' or '2026-04-01T00:00:00')"},
@@ -302,7 +341,7 @@ async def list_tools() -> List[Tool]:
                 "type": "object",
                 "properties": {
                     "content": {"type": "string", "description": "Content to store"},
-                    "source": {"type": "string", "description": "Source label (e.g. claude-code, manual, dashboard, telegram, email, mcp)", "default": "mcp"},
+                    "source": {"type": "string", "description": "Source label (e.g. claude-code, manual, web, telegram, email, mcp)", "default": "mcp"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional user-supplied tags (merged with auto-tagged)"},
                     "importance": {"type": "number", "description": "Importance 0-1", "default": 0.5},
                     "metadata": {"type": "object", "description": "Additional metadata (stored as-is)"},
@@ -313,6 +352,7 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_get",
             description=f"Fetch a single memory by ID. Returns a memory record {MEMORY_RECORD_SHAPE} or null.",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -330,6 +370,7 @@ async def list_tools() -> List[Tool]:
                 "recomputed automatically (user-supplied 'tags' still win). "
                 "Returns {updated: bool, reembedded: bool, tags: [...], entities: {...}}."
             ),
+            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -345,6 +386,7 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_update_tags",
             description="Replace the tag list on an existing memory. Returns {updated: bool}.",
+            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -398,6 +440,7 @@ async def list_tools() -> List[Tool]:
                 "created_at_a, created_at_b}]; each pair appears once (id_a < id_b), "
                 "sorted by similarity desc."
             ),
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -413,6 +456,7 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_get_related",
             description=f"Get memories semantically related to a given memory. Returns a list of memory records {MEMORY_RECORD_SHAPE}.",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -430,6 +474,7 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_get_entity",
             description=f"Get memories containing a specific entity. Returns a list of memory records {MEMORY_RECORD_SHAPE}.",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -449,6 +494,7 @@ async def list_tools() -> List[Tool]:
                 "timezone, not the caller's. "
                 f"Returns a list of memory records {MEMORY_RECORD_SHAPE}."
             ),
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -460,6 +506,7 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_recent",
             description=f"Get the most recent memories with pagination. Returns a list of memory records {MEMORY_RECORD_SHAPE}.",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -473,6 +520,7 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_timeline",
             description="Get memories grouped by day for timeline views. Returns {days: {YYYY-MM-DD: [memory, ...]}, has_more: bool}.",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -486,6 +534,7 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_graph",
             description="Build the entity co-occurrence graph. Returns {nodes: [{id, label, type, count}], edges: [{source, target, weight}]}.",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -497,11 +546,13 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_entity_types",
             description="Get counts of memories per entity type. Returns {entity_type: count}.",
+            annotations=_read_only(),
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
             name="memory_entity_names",
             description="List distinct entity names for a given type, with memory counts. Returns [{name, count}].",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -518,6 +569,7 @@ async def list_tools() -> List[Tool]:
                 "filters, without pulling any rows. Same filter semantics as "
                 "memory_search. Returns {count: int}."
             ),
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -534,11 +586,13 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_stats",
             description="Get memory statistics: total count, per-source counts, top tags, weekly activity. Returns a JSON object.",
+            annotations=_read_only(),
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
             name="memory_trends",
             description="Get trending tags over recent weeks. Returns {tag: count}.",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -550,7 +604,7 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_activity_timeline",
             description="Daily memory counts over the last N days. Returns {YYYY-MM-DD: count}.",
-            annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -561,12 +615,13 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_peak_hours",
             description="Memory counts bucketed by hour-of-day over the last 30 days. Returns {hour: count}.",
-            annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+            annotations=_read_only(),
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
             name="memory_weekly_report",
             description="Generate a human-readable markdown report of memory activity over the last N days.",
+            annotations=_read_only(),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -630,7 +685,7 @@ async def call_tool(name: str, arguments: Any) -> List[TextContent]:
         if name == "memory_weekly_report":
             return await handle_weekly_report(args)
         return _json({"error": f"Unknown tool: {name}"})
-    except ValueError as e:
+    except (KeyError, ValueError) as e:
         return _json({"error": f"Invalid input: {e}"})
     except Exception as e:
         print(f"Tool '{name}' failed: {e}", file=sys.stderr)
@@ -639,10 +694,12 @@ async def call_tool(name: str, arguments: Any) -> List[TextContent]:
 
 async def handle_memory_search(args: Dict) -> List[TextContent]:
     query = args.get("query", "") or ""
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
     limit = _clamp(args.get("limit", 10), 1, 200, 10)
-    sources = args.get("sources")
-    tags = args.get("tags")
-    tags_all = args.get("tags_all")
+    sources = _string_list(args.get("sources"), "sources")
+    tags = _string_list(args.get("tags"), "tags")
+    tags_all = _string_list(args.get("tags_all"), "tags_all")
     date_from = _parse_dt(args.get("date_from"))
     date_to = _parse_dt(args.get("date_to"))
 
@@ -681,10 +738,15 @@ async def handle_memory_search(args: Dict) -> List[TextContent]:
 
 async def handle_memory_store(args: Dict) -> List[TextContent]:
     content = args["content"]
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("content must be a non-empty string")
     source = args.get("source", "mcp")
-    user_tags = args.get("tags", []) or []
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("source must be a non-empty string")
+    source = source.strip()
+    user_tags = _string_list(args.get("tags"), "tags") or []
     importance = _clamp_importance(args.get("importance", 0.5), default=0.5)
-    metadata = args.get("metadata", {}) or {}
+    metadata = _dict_arg(args.get("metadata", {}), "metadata")
 
     entities = extract_entities(content)
     tags = auto_tag(content, entities, source, user_tags)
@@ -727,8 +789,14 @@ async def handle_memory_get(args: Dict) -> List[TextContent]:
 async def handle_memory_update(args: Dict) -> List[TextContent]:
     memory_id = uuid.UUID(args["memory_id"])
     content = args.get("content")
-    user_tags = args.get("tags")
+    if content is not None and (not isinstance(content, str) or not content.strip()):
+        raise ValueError("content must be a non-empty string")
+    user_tags = _string_list(args.get("tags"), "tags")
     source = args.get("source")
+    if source is not None:
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("source must be a non-empty string")
+        source = source.strip()
     importance = args.get("importance")
 
     update_kwargs: Dict[str, Any] = {}
@@ -778,7 +846,8 @@ async def handle_memory_update(args: Dict) -> List[TextContent]:
 
 async def handle_memory_update_tags(args: Dict) -> List[TextContent]:
     memory_id = uuid.UUID(args["memory_id"])
-    ok = await asyncio.to_thread(update_memory_tags, memory_id, args["tags"])
+    tags = _string_list(args["tags"], "tags") or []
+    ok = await asyncio.to_thread(update_memory_tags, memory_id, tags)
     return _json({"updated": ok})
 
 
@@ -789,7 +858,7 @@ async def handle_memory_delete(args: Dict) -> List[TextContent]:
 
 
 async def handle_memory_bulk_delete(args: Dict) -> List[TextContent]:
-    if not bool(args.get("confirm")):
+    if args.get("confirm") is not True:
         return _json({"error": "memory_bulk_delete requires confirm=true"})
 
     def _to_float(v):
@@ -798,7 +867,7 @@ async def handle_memory_bulk_delete(args: Dict) -> List[TextContent]:
         except (TypeError, ValueError):
             return None
 
-    ids = args.get("ids")
+    ids = _string_list(args.get("ids"), "ids")
     parsed_ids: Optional[List[uuid.UUID]] = None
     if ids:
         try:
@@ -810,9 +879,9 @@ async def handle_memory_bulk_delete(args: Dict) -> List[TextContent]:
         deleted = await asyncio.to_thread(
             bulk_delete_memories,
             ids=parsed_ids,
-            sources=args.get("sources"),
-            tags=args.get("tags"),
-            tags_all=args.get("tags_all"),
+            sources=_string_list(args.get("sources"), "sources"),
+            tags=_string_list(args.get("tags"), "tags"),
+            tags_all=_string_list(args.get("tags_all"), "tags_all"),
             date_from=_parse_dt(args.get("date_from")),
             date_to=_parse_dt(args.get("date_to")),
             importance_min=_to_float(args.get("importance_min")),
@@ -853,7 +922,7 @@ async def handle_memory_find_duplicates(args: Dict) -> List[TextContent]:
         limit=limit,
         date_from=_parse_dt(args.get("date_from")),
         date_to=_parse_dt(args.get("date_to")),
-        sources=args.get("sources"),
+        sources=_string_list(args.get("sources"), "sources"),
     )
 
     opts = _content_opts(args)
@@ -889,8 +958,11 @@ async def handle_memory_get_related(args: Dict) -> List[TextContent]:
 
 
 async def handle_memory_get_entity(args: Dict) -> List[TextContent]:
-    entity_type = args["entity_type"]
+    entity_type = _require_entity_type(args["entity_type"])
     entity_name = args["entity_name"]
+    if not isinstance(entity_name, str) or not entity_name.strip():
+        raise ValueError("entity_name must be a non-empty string")
+    entity_name = entity_name.strip()
     limit = _clamp(args.get("limit", 10), 1, 200, 10)
     results = await asyncio.to_thread(get_memories_by_entity, entity_type, entity_name, limit)
     return _json(_serialize_memories(results, **_content_opts(args)))
@@ -906,6 +978,10 @@ async def handle_memory_recent(args: Dict) -> List[TextContent]:
     limit = _clamp(args.get("limit", 20), 1, 200, 20)
     offset = _clamp(args.get("offset", 0), 0, 1_000_000, 0)
     source = args.get("source")
+    if source is not None:
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("source must be a non-empty string")
+        source = source.strip()
     results = await asyncio.to_thread(get_recent_memories, limit=limit, offset=offset, source=source)
     return _json(_serialize_memories(results, **_content_opts(args)))
 
@@ -924,7 +1000,7 @@ async def handle_memory_timeline(args: Dict) -> List[TextContent]:
 
 
 async def handle_memory_graph(args: Dict) -> List[TextContent]:
-    types = args.get("types")
+    types = _string_list(args.get("types"), "types")
     limit = _clamp(args.get("limit", 200), 1, 500, 200)
     return _json(await asyncio.to_thread(get_entity_graph, types=types, limit=limit))
 
@@ -934,7 +1010,7 @@ async def handle_memory_entity_types(args: Dict) -> List[TextContent]:
 
 
 async def handle_memory_entity_names(args: Dict) -> List[TextContent]:
-    entity_type = args["entity_type"]
+    entity_type = _require_entity_type(args["entity_type"])
     limit = _clamp(args.get("limit", 50), 1, 500, 50)
     return _json(await asyncio.to_thread(get_entity_names, entity_type, limit))
 
@@ -947,9 +1023,9 @@ async def handle_memory_count(args: Dict) -> List[TextContent]:
             return None
     count = await asyncio.to_thread(
         count_memories,
-        sources=args.get("sources"),
-        tags=args.get("tags"),
-        tags_all=args.get("tags_all"),
+        sources=_string_list(args.get("sources"), "sources"),
+        tags=_string_list(args.get("tags"), "tags"),
+        tags_all=_string_list(args.get("tags_all"), "tags_all"),
         date_from=_parse_dt(args.get("date_from")),
         date_to=_parse_dt(args.get("date_to")),
         importance_min=_to_float(args.get("importance_min")),
