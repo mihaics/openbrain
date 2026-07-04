@@ -138,8 +138,8 @@ database:
 
 embedder:
   provider: ollama  # or openai
-  model: nomic-embed-text
-  dimensions: 768
+  model: qwen3-embedding:0.6b
+  dimensions: 1024
 
 mcp:
   host: 0.0.0.0

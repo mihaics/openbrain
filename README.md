@@ -54,7 +54,7 @@ For local Ollama:
 
 ```env
 EMBEDDER_PROVIDER=ollama
-EMBEDDER_MODEL=nomic-embed-text
+EMBEDDER_MODEL=qwen3-embedding:0.6b
 OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 

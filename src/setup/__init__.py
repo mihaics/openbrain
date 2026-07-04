@@ -74,8 +74,8 @@ def run_setup() -> Dict[str, Any]:
             
     elif choice == "3":  # Ollama
         embedder_config['provider'] = 'ollama'
-        embedder_config['model'] = prompt_env("EMBED_MODEL", "nomic-embed-text")
-        embedder_config['dimensions'] = 768
+        embedder_config['model'] = prompt_env("EMBED_MODEL", "qwen3-embedding:0.6b")
+        embedder_config['dimensions'] = 1024
         embedder_config['ollama_base_url'] = prompt_env("OLLAMA_BASE_URL", "http://localhost:11434")
         
     elif choice == "4":  # Custom
