@@ -30,6 +30,7 @@ embedder:
 ```
 """
 import os
+import sys
 from typing import List, Optional
 from abc import ABC, abstractmethod
 
@@ -327,17 +328,25 @@ class OllamaEmbedder(BaseEmbedder):
             )
         return embedding
     
-    def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        embeddings = []
-        
+    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+        """Embed several texts, yielding None for any that fail.
+
+        A failed item is None, never a zero vector. A zero vector is not a
+        missing embedding: pgvector's cosine distance against it is NaN, so
+        the row participates in ranking and duplicate detection with an
+        undefined score instead of being correctly excluded.
+        """
+        embeddings: List[Optional[List[float]]] = []
+
         for text in texts:
             try:
-                embedding = self.embed(text)
-                embeddings.append(embedding)
+                embeddings.append(self.embed(text))
             except Exception as e:
-                print(f"Error embedding text: {e}")
-                embeddings.append([0.0] * self.dimensions)
-        
+                # stderr, not stdout: src/main.py is an MCP stdio server and
+                # anything on stdout corrupts the protocol stream.
+                print(f"Error embedding text: {e}", file=sys.stderr)
+                embeddings.append(None)
+
         return embeddings
     
     def is_available(self) -> bool:
@@ -463,8 +472,64 @@ def create_embedding(text: str) -> List[float]:
     return get_embedder().embed(text)
 
 
-def create_embeddings(texts: List[str]) -> List[List[float]]:
-    """Convenience function to create multiple embeddings."""
+class EmbeddingError(RuntimeError):
+    """Raised when an embedding cannot be produced or is unusable.
+
+    Callers treat this as "no embedding available" and degrade — storing a
+    NULL embedding, or falling back to text-only search. It must never
+    propagate to a user as a failed store: losing a memory is worse than
+    storing one that is temporarily absent from vector search.
+    """
+
+
+def create_validated_embedding(
+    text: str,
+    expected_dim: Optional[int] = None,
+) -> List[float]:
+    """Create an embedding, rejecting output that would corrupt the database.
+
+    Validation happens here, in the caller's try block, rather than in the
+    database layer. The DB-layer check in queries._validate_embedding runs
+    after the caller's exception handling has already completed, so relying
+    on it alone turns a degraded embedding into a lost memory.
+
+    Args:
+        text: Content to embed.
+        expected_dim: Declared dimension of the target column, normally
+            get_vector_dim(). None skips the dimension check.
+
+    Raises:
+        EmbeddingError: provider failed, or returned an empty, all-zero, or
+            wrongly-dimensioned vector.
+    """
+    try:
+        embedding = create_embedding(text)
+    except Exception as e:
+        raise EmbeddingError(str(e)) from e
+
+    if not embedding:
+        raise EmbeddingError("embedder returned an empty embedding")
+
+    if all(v == 0.0 for v in embedding):
+        raise EmbeddingError(
+            "embedder returned an all-zero embedding, which is not a valid "
+            "vector for cosine similarity"
+        )
+
+    if expected_dim and len(embedding) != expected_dim:
+        raise EmbeddingError(
+            f"embedding dimension mismatch: got {len(embedding)}, "
+            f"target column is vector({expected_dim})"
+        )
+
+    return embedding
+
+
+def create_embeddings(texts: List[str]) -> List[Optional[List[float]]]:
+    """Convenience function to create multiple embeddings.
+
+    Failed items are None. Callers must handle that before inserting.
+    """
     return get_embedder().embed_batch(texts)
 
 
