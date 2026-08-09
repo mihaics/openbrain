@@ -12,6 +12,15 @@ from .connection import get_db_cursor, get_vector_dim
 JSON_MEMORY_FIELDS = ("entities", "metadata", "tag_sources")
 
 
+UNSET = object()
+"""Sentinel distinguishing "field not supplied" from an explicit None.
+
+update_memory previously treated None as "do not update this field", which
+made it impossible to clear an embedding. Callers that must clear one now
+pass embedding=None; callers leaving it alone pass nothing.
+"""
+
+
 def _decode_json_field(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
@@ -31,10 +40,23 @@ def _decode_memory_rows(rows: List[Any]) -> List[Dict[str, Any]]:
     return [_decode_memory_row(row) for row in rows]
 
 
-def _validate_embedding_dim(embedding: Optional[List[float]]) -> Optional[List[float]]:
-    """Reject embeddings whose length doesn't match the DB column dimension."""
+def _validate_embedding(embedding: Optional[List[float]]) -> Optional[List[float]]:
+    """Reject embeddings that would corrupt vector search. None passes through.
+
+    This is a backstop. Callers should validate via
+    embedder.create_validated_embedding inside their own try block, because
+    this function raises after their exception handling has finished.
+    """
     if embedding is None:
         return None
+
+    if all(v == 0.0 for v in embedding):
+        raise ValueError(
+            "Refusing to store an all-zero embedding: cosine distance "
+            "against it is NaN, which corrupts ranking and duplicate "
+            "detection. Store NULL instead."
+        )
+
     expected = get_vector_dim()
     if expected and len(embedding) != expected:
         raise ValueError(
@@ -81,7 +103,7 @@ def insert_memory(
     """
     memory_id = uuid.uuid4()
 
-    embedding = _validate_embedding_dim(embedding)
+    embedding = _validate_embedding(embedding)
 
     # Ensure JSON fields are proper Python dicts/lists
     entities_dict = dict(entities) if entities else {}
@@ -167,7 +189,7 @@ def search_memories(
     has_text = bool(query and query.strip())
     has_vector = embedding is not None
     if has_vector:
-        embedding = _validate_embedding_dim(embedding)
+        embedding = _validate_embedding(embedding)
 
     # Candidate pool: fetch more than limit so RRF has enough to merge
     pool = max(limit * 4, 20)
@@ -355,11 +377,29 @@ def update_memory(
     tags: Optional[List[str]] = None,
     source: Optional[str] = None,
     importance: Optional[float] = None,
-    embedding: Optional[List[float]] = None,
+    embedding: Any = UNSET,
     entities: Optional[Dict] = None,
     tag_sources: Optional[Dict] = None,
 ) -> bool:
-    """Partially update a memory. Only fields that are not None are written."""
+    """Partially update a memory. Only supplied fields are written.
+
+    embedding is three-valued: UNSET leaves the column alone, None sets it
+    to NULL, a list replaces it.
+
+    Raises:
+        ValueError: content supplied without an embedding decision. Writing
+            new content over an old vector leaves the row semantically
+            mismatched, findable by a query that matches text it no longer
+            contains.
+    """
+    if content is not None and embedding is UNSET:
+        raise ValueError(
+            "update_memory: content was supplied without an embedding "
+            "decision. Pass a fresh embedding, or embedding=None to clear "
+            "the stale one. Leaving the old vector attached to new content "
+            "silently corrupts vector search."
+        )
+
     sets: List[str] = []
     params: List[Any] = []
 
@@ -375,9 +415,12 @@ def update_memory(
     if importance is not None:
         sets.append("importance = %s")
         params.append(float(importance))
-    if embedding is not None:
-        sets.append("embedding = %s")
-        params.append(_validate_embedding_dim(embedding))
+    if embedding is not UNSET:
+        if embedding is None:
+            sets.append("embedding = NULL")
+        else:
+            sets.append("embedding = %s")
+            params.append(_validate_embedding(embedding))
     if entities is not None:
         sets.append("entities = %s")
         params.append(json.dumps(entities))
