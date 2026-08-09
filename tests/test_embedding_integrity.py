@@ -2,6 +2,7 @@
 import os
 import sys
 import uuid
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
@@ -229,19 +230,20 @@ class TestCallSiteDegradation:
         assert rc == 0
         assert mock_search.call_args.kwargs['embedding'] is None
 
-    @pytest.mark.parametrize("module,text_field", [
-        ("src.connectors.gmail", "content"),
-        ("src.connectors.file_watcher", "body"),
-        ("src.connectors.claude_code", "text"),
-        ("src.connectors.whatsapp", "text"),
-        ("src.connectors.telegram", "text"),
+    @pytest.mark.parametrize("module", [
+        "src.connectors.gmail",
+        "src.connectors.file_watcher",
+        "src.connectors.claude_code",
+        "src.connectors.whatsapp",
+        "src.connectors.telegram",
     ])
-    def test_connectors_import_validated_helper(self, module, text_field):
+    def test_connectors_import_validated_helper(self, module):
         """Every connector must route through the validated helper.
 
-        A grep-style assertion rather than a behavioral one: the connectors
-        need live inputs to exercise, but the thing that must not regress is
-        that none of them calls the raw embedder.
+        A grep-style assertion rather than a behavioral one: it catches an
+        import reverting to the raw embedder, but not a connector that routes
+        through the helper and then throws the row away on failure. See
+        TestConnectorDegradesOnEmbeddingError below for the behavioral check.
         """
         import importlib
         mod = importlib.import_module(module)
@@ -250,6 +252,92 @@ class TestCallSiteDegradation:
         )
         assert not hasattr(mod, 'create_embedding'), (
             f"{module} still imports the unvalidated create_embedding"
+        )
+
+
+def _gmail_driver(tmp_path):
+    from src.connectors.gmail import GmailConnector
+
+    connector = GmailConnector(str(tmp_path))
+    connector._process_email_content(
+        "email body content", "a@b.com", "Subject line", "2024-01-01"
+    )
+
+
+def _file_watcher_driver(tmp_path):
+    from src.connectors.file_watcher import FileWatcherConnector
+
+    md_file = tmp_path / "note.md"
+    md_file.write_text("# Title\n\nSome body text.")
+    connector = FileWatcherConnector(str(tmp_path))
+    connector.import_file(md_file)
+
+
+def _claude_code_driver(tmp_path):
+    from src.connectors.claude_code import ClaudeCodeConnector
+
+    connector = ClaudeCodeConnector(str(tmp_path))
+    connector._process_message(
+        {"role": "user", "content": "hello"}, "sess-1", "Session", "2024-01-01"
+    )
+
+
+def _whatsapp_driver(tmp_path):
+    from src.connectors.whatsapp import WhatsAppConnector
+
+    connector = WhatsAppConnector(str(tmp_path))
+    connector._process_message({
+        "date": datetime.now(), "sender": "Bob", "text": "hello",
+    })
+
+
+def _telegram_driver(tmp_path):
+    from src.connectors.telegram import TelegramConnector
+
+    connector = TelegramConnector(str(tmp_path))
+    connector._process_message({
+        "text": "hello", "from": "Bob", "date": "2024-01-01",
+    })
+
+
+class TestConnectorDegradesOnEmbeddingError:
+    """Every connector stores the row with a NULL embedding on EmbeddingError,
+    instead of silently dropping it.
+
+    Behavioral, not structural: this drives each connector's actual
+    processing path with create_validated_embedding patched to raise, and
+    asserts insert_memory still fires with embedding=None. Mutating any of
+    these except-blocks to `return` early (dropping the row) must fail this
+    test - unlike test_connectors_import_validated_helper above, which only
+    checks the import shape.
+    """
+
+    @pytest.mark.parametrize("module,driver", [
+        ("src.connectors.gmail", _gmail_driver),
+        ("src.connectors.file_watcher", _file_watcher_driver),
+        ("src.connectors.claude_code", _claude_code_driver),
+        ("src.connectors.whatsapp", _whatsapp_driver),
+        ("src.connectors.telegram", _telegram_driver),
+    ])
+    def test_connector_stores_null_on_embedding_error(self, module, driver, tmp_path):
+        import importlib
+        mod = importlib.import_module(module)
+
+        # Same identity rule as the MCP/REST tests: take EmbeddingError from
+        # the module under test, since each connector imports it directly
+        # (`from ..embedder import EmbeddingError, ...`).
+        with patch(f'{module}.create_validated_embedding',
+                   side_effect=mod.EmbeddingError("down")), \
+             patch(f'{module}.insert_memory', return_value=uuid.uuid4()) as mock_insert, \
+             patch(f'{module}.extract_entities', return_value={}), \
+             patch(f'{module}.auto_tag', return_value={"auto": "auto"}), \
+             patch(f'{module}.get_vector_dim', return_value=1024):
+            driver(tmp_path)
+
+        mock_insert.assert_called_once()
+        assert mock_insert.call_args.kwargs['embedding'] is None, (
+            f"{module}: a failed embedding must store the row with a NULL "
+            f"embedding, not drop it"
         )
 
 
@@ -297,7 +385,7 @@ class TestMcpDegradation:
                 "memory_id": str(uuid.uuid4()), "content": "new content",
             })
 
-        assert mock_update.call_args.kwargs['embedding'] is None, (
+        assert mock_update.call_args.kwargs.get('embedding', 'MISSING') is None, (
             "a failed re-embed must clear the stale vector, not keep it"
         )
 
@@ -314,7 +402,7 @@ class TestMcpDegradation:
 
 
 class TestRestDegradation:
-    """The REST update endpoint never re-embedded at all."""
+    """The REST endpoints must degrade, never lose a row or a search."""
 
     async def test_update_reembeds_and_retags(self):
         from src.api.main import MemoryUpdate, update_memory_endpoint
@@ -353,3 +441,36 @@ class TestRestDegradation:
             ))
 
         assert mock_update.call_args.kwargs['embedding'] is None
+
+    async def test_create_memory_stores_null_on_embedding_error(self):
+        """POST /memories must not drop the row when embedding fails."""
+        import src.api.main as api
+        from src.api.main import MemoryCreate, create_memory
+
+        mock_tagger = Mock()
+        mock_tagger.tag.return_value = {"auto": "auto"}
+
+        with patch('src.api.main.create_validated_embedding',
+                   side_effect=api.EmbeddingError("down")), \
+             patch('src.api.main.get_vector_dim', return_value=1024), \
+             patch('src.api.main.extract_entities', return_value={}), \
+             patch('src.api.main.get_tagger', return_value=mock_tagger), \
+             patch('src.api.main.insert_memory', return_value=uuid.uuid4()) as mock_insert:
+            result = await create_memory(MemoryCreate(content="new memory", source="api"))
+
+        assert result["status"] == "stored"
+        assert mock_insert.call_args.kwargs['embedding'] is None
+
+    async def test_search_endpoint_degrades_to_text_only(self):
+        """POST /memories/search must fall back to text-only, never raise."""
+        import src.api.main as api
+        from src.api.main import SearchRequest, search_memories_endpoint
+
+        with patch('src.api.main.create_validated_embedding',
+                   side_effect=api.EmbeddingError("down")), \
+             patch('src.api.main.get_vector_dim', return_value=1024), \
+             patch('src.api.main.search_memories', return_value=[]) as mock_search:
+            result = await search_memories_endpoint(SearchRequest(query="q"))
+
+        assert result == []
+        assert mock_search.call_args.kwargs['embedding'] is None
