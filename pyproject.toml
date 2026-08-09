@@ -55,3 +55,11 @@ include = ["src*", "config*", "scripts*"]
 
 [tool.setuptools.package-data]
 config = ["*.yaml", "*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires a live PostgreSQL cluster; deselected by default",
+]
+addopts = "-m 'not integration'"
