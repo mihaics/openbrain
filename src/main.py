@@ -40,7 +40,7 @@ from db.queries import (
     get_recent_memories,
     get_trending_tags,
 )
-from embedder import EmbedderConfig, create_embedding
+from embedder import EmbedderConfig, EmbeddingError, create_validated_embedding
 from extractors.entities import extract_entities
 from extractors.tagger import auto_tag
 from analytics.trends import TrendAnalyzer
@@ -715,9 +715,11 @@ async def handle_memory_search(args: Dict) -> List[TextContent]:
     embedding = None
     if query.strip():
         try:
-            embedding = await asyncio.to_thread(create_embedding, query)
-        except Exception as e:
-            print(f"Warning: Could not create embedding: {e}", file=sys.stderr)
+            embedding = await asyncio.to_thread(
+                create_validated_embedding, query, get_vector_dim()
+            )
+        except EmbeddingError as e:
+            print(f"Warning: text-only search: {e}", file=sys.stderr)
 
     results = await asyncio.to_thread(
         search_memories,
@@ -754,10 +756,12 @@ async def handle_memory_store(args: Dict) -> List[TextContent]:
     embedding = None
     embedded = False
     try:
-        embedding = await asyncio.to_thread(create_embedding, content)
-        embedded = embedding is not None
-    except Exception as e:
-        print(f"Warning: Could not create embedding: {e}", file=sys.stderr)
+        embedding = await asyncio.to_thread(
+            create_validated_embedding, content, get_vector_dim()
+        )
+        embedded = True
+    except EmbeddingError as e:
+        print(f"Warning: storing without embedding: {e}", file=sys.stderr)
 
     memory_id = await asyncio.to_thread(
         insert_memory,
@@ -819,12 +823,13 @@ async def handle_memory_update(args: Dict) -> List[TextContent]:
         update_kwargs["tags"] = new_tags
         update_kwargs["tag_sources"] = tag_map
         try:
-            emb = await asyncio.to_thread(create_embedding, content)
-            if emb:
-                update_kwargs["embedding"] = emb
-                reembedded = True
-        except Exception as e:
-            print(f"Warning: re-embed failed on update: {e}", file=sys.stderr)
+            update_kwargs["embedding"] = await asyncio.to_thread(
+                create_validated_embedding, content, get_vector_dim()
+            )
+            reembedded = True
+        except EmbeddingError as e:
+            print(f"Warning: re-embed failed, clearing embedding: {e}", file=sys.stderr)
+            update_kwargs["embedding"] = None
     elif user_tags is not None:
         update_kwargs["tags"] = user_tags
         update_kwargs["tag_sources"] = {t: "user" for t in user_tags}

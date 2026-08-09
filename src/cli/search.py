@@ -5,8 +5,9 @@ import json
 import sys
 from argparse import Namespace
 
+from ..db.connection import get_vector_dim
 from ..db.queries import search_memories
-from ..embedder import create_embedding
+from ..embedder import EmbeddingError, create_validated_embedding
 
 
 def search_memories_cmd(args: Namespace) -> int:
@@ -17,9 +18,9 @@ def search_memories_cmd(args: Namespace) -> int:
     # Generate embedding for semantic search
     embedding = None
     try:
-        embedding = create_embedding(query)
-    except Exception as e:
-        print(f"Warning: Could not create embedding: {e}", file=sys.stderr)
+        embedding = create_validated_embedding(query, get_vector_dim())
+    except EmbeddingError as e:
+        print(f"Warning: text-only search, no query embedding: {e}", file=sys.stderr)
     
     # Build filters
     filters = {}

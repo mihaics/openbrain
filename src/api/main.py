@@ -16,7 +16,7 @@ from pydantic import BaseModel
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from db.connection import init_db
+from db.connection import get_vector_dim, init_db
 from db.queries import (
     search_memories,
     get_memory_by_id,
@@ -33,9 +33,9 @@ from db.queries import (
     get_entity_memories,
     get_entity_graph
 )
-from embedder import create_embedding
+from embedder import EmbeddingError, create_validated_embedding
 from extractors.entities import extract_entities
-from extractors.tagger import get_tagger
+from extractors.tagger import get_tagger, auto_tag
 from analytics.trends import TrendAnalyzer
 from analytics.weekly_report import generate_weekly_report
 
@@ -159,10 +159,10 @@ async def create_memory(memory: MemoryCreate):
     # Generate embedding
     embedding = None
     try:
-        embedding = create_embedding(content)
-    except Exception as e:
-        print(f"Warning: Could not create embedding: {e}")
-    
+        embedding = create_validated_embedding(content, get_vector_dim())
+    except EmbeddingError as e:
+        print(f"Warning: storing without embedding: {e}", file=sys.stderr)
+
     # Store in database
     memory_id = insert_memory(
         source=source,
@@ -232,13 +232,32 @@ class TagsUpdate(BaseModel):
 
 @app.put("/memories/{memory_id}")
 async def update_memory_endpoint(memory_id: str, update: MemoryUpdate):
-    """Update a memory."""
+    """Update a memory, re-embedding and re-tagging its new content."""
     import uuid as uuid_mod
     try:
         mid = uuid_mod.UUID(memory_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid memory ID")
-    updated = update_memory(mid, update.content, update.tags, update.source, update.importance)
+
+    entities = extract_entities(update.content)
+    tag_map = auto_tag(update.content, entities, update.source, update.tags)
+
+    embedding = None
+    try:
+        embedding = create_validated_embedding(update.content, get_vector_dim())
+    except EmbeddingError as e:
+        print(f"Warning: clearing embedding on update: {e}", file=sys.stderr)
+
+    updated = update_memory(
+        mid,
+        content=update.content,
+        tags=list(tag_map.keys()),
+        source=update.source,
+        importance=update.importance,
+        embedding=embedding,
+        entities=entities,
+        tag_sources=tag_map,
+    )
     if not updated:
         raise HTTPException(status_code=404, detail="Memory not found")
     return {"status": "updated", "id": memory_id}
@@ -293,9 +312,9 @@ async def search_memories_endpoint(search: SearchRequest):
     embedding = None
     if query:
         try:
-            embedding = create_embedding(query)
-        except Exception as e:
-            print(f"Warning: Could not create embedding: {e}")
+            embedding = create_validated_embedding(query, get_vector_dim())
+        except EmbeddingError as e:
+            print(f"Warning: text-only search: {e}", file=sys.stderr)
 
     results = search_memories(
         query=query,

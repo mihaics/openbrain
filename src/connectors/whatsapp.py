@@ -4,12 +4,14 @@ Imports messages from WhatsApp chat export.
 """
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Generator, List, Optional
 
+from ..db.connection import get_vector_dim
 from ..db.queries import insert_memory
-from ..embedder import create_embedding
+from ..embedder import EmbeddingError, create_validated_embedding
 from ..extractors.entities import extract_entities
 from ..extractors.tagger import auto_tag
 
@@ -109,9 +111,9 @@ class WhatsAppConnector:
         # Generate embedding
         embedding = None
         try:
-            embedding = create_embedding(text)
-        except Exception as e:
-            print(f"Warning: Could not create embedding: {e}")
+            embedding = create_validated_embedding(text, get_vector_dim())
+        except EmbeddingError as e:
+            print(f"Warning: importing without embedding: {e}", file=sys.stderr)
         
         # Store memory
         memory_id = insert_memory(

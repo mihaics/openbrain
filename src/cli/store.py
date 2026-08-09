@@ -5,8 +5,9 @@ import json
 import sys
 from argparse import Namespace
 
+from ..db.connection import get_vector_dim
 from ..db.queries import insert_memory
-from ..embedder import create_embedding
+from ..embedder import EmbeddingError, create_validated_embedding
 from ..extractors.entities import extract_entities
 from ..extractors.tagger import auto_tag
 
@@ -27,9 +28,9 @@ def store_memory_cmd(args: Namespace) -> int:
     # Generate embedding
     embedding = None
     try:
-        embedding = create_embedding(content)
-    except Exception as e:
-        print(f"Warning: Could not create embedding: {e}", file=sys.stderr)
+        embedding = create_validated_embedding(content, get_vector_dim())
+    except EmbeddingError as e:
+        print(f"Warning: storing without embedding: {e}", file=sys.stderr)
     
     # Store in database
     memory_id = insert_memory(

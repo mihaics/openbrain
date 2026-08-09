@@ -3,13 +3,15 @@ File watcher connector.
 Watches a folder for new Markdown files and imports them.
 """
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
 
+from ..db.connection import get_vector_dim
 from ..db.queries import insert_memory
-from ..embedder import create_embedding
+from ..embedder import EmbeddingError, create_validated_embedding
 from ..extractors.entities import extract_entities
 from ..extractors.tagger import auto_tag
 
@@ -137,9 +139,9 @@ class FileWatcherConnector:
         # Generate embedding
         embedding = None
         try:
-            embedding = create_embedding(body)
-        except Exception as e:
-            print(f"Warning: Could not create embedding: {e}")
+            embedding = create_validated_embedding(body, get_vector_dim())
+        except EmbeddingError as e:
+            print(f"Warning: importing without embedding: {e}", file=sys.stderr)
         
         # Store memory
         memory_id = insert_memory(
