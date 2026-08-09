@@ -1,6 +1,4 @@
 """Tests for the reembed sweep."""
-import os
-import sys
 import uuid
 from unittest.mock import Mock, call, patch
 
@@ -30,7 +28,7 @@ class TestZeroVectorRepair:
         with patch('src.cli.reembed.get_db_cursor', return_value=ctx), \
              patch('src.cli.reembed.get_vector_dim', return_value=1024), \
              patch('src.cli.reembed.create_validated_embedding',
-                   side_effect=EmbeddingError("ollama down")), \
+                   side_effect=EmbeddingError("ollama down")) as mock_embed, \
              patch('src.cli.reembed.acquire_lock'):
             report = reembed.run_sweep(limit=10, dry_run=False)
 
@@ -39,6 +37,12 @@ class TestZeroVectorRepair:
             "a zero vector must be NULLed even when replacement fails"
         )
         assert report.zeros_repaired == 1
+        assert mock_embed.call_count == 0, (
+            "phase 1 (zero-vector repair) must not depend on the embedder "
+            "being reachable - it always fails here, so if phase 1 called "
+            "it at all, a sweep started while Ollama is down would repair "
+            "nothing"
+        )
 
 
 class TestOptimisticGuard:
