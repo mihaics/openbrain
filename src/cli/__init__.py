@@ -94,7 +94,21 @@ def main():
         metavar='COMMAND',
         help='Command to execute. If omitted, stdin is used.'
     )
-    
+
+    # Reembed command
+    reembed_parser = subparsers.add_parser(
+        'reembed', help='Re-embed memories with NULL or zero embeddings'
+    )
+    reembed_parser.add_argument('--limit', '-n', type=int, default=100,
+                                help='Max rows to examine (default: 100)')
+    reembed_parser.add_argument('--dry-run', action='store_true',
+                                help='Report what would change, write nothing')
+    reembed_parser.add_argument('--skip-ids', default='',
+                                help='Comma-separated memory ids to exclude. '
+                                     'Three deterministically failing oldest '
+                                     'rows would otherwise wedge every sweep, '
+                                     'since selection is oldest-first.')
+
     args = parser.parse_args()
     
     if not args.command:
@@ -123,6 +137,9 @@ def main():
         elif args.command == 'exec':
             from .exec_command import exec_cmd
             return exec_cmd(args)
+        elif args.command == 'reembed':
+            from .reembed import reembed_cmd
+            return reembed_cmd(args)
         else:
             parser.print_help()
             return 1
