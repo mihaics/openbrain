@@ -380,7 +380,9 @@ class TestMcpDegradation:
              patch('src.main.update_memory', return_value=True) as mock_update, \
              patch('src.main.get_memory_by_id', return_value={"source": "test"}), \
              patch('src.main.extract_entities', return_value={}), \
-             patch('src.main.auto_tag', return_value={"auto": "auto"}):
+             patch('src.main.auto_tag', return_value={"auto": "auto"}), \
+             patch('src.main.merge_tags_for_content_update',
+                   return_value=(["auto"], {"auto": "auto"})):
             await mcp.handle_memory_update({
                 "memory_id": str(uuid.uuid4()), "content": "new content",
             })
