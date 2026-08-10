@@ -1,4 +1,4 @@
-# OpenBrain Retrieval Quality — Design (revision 5)
+# OpenBrain Retrieval Quality — Design (revision 7)
 
 Scope: sub-project 2 of 4. Sub-project 1 (reliability bundle) shipped
 2026-08-10. Sub-projects 3 (auto-capture) and 4 (transcript-search MCP)
@@ -16,8 +16,11 @@ undefined, and review found a *live* tag-loss bug in `handle_memory_update`
 plus a startup barrier both servers would have swallowed. R4 → R5: the
 textless rerank bypass could over-return, the undo format collided with its own
 duplicate-ID rule, an uncaught error cannot serve 503, and review found a second
-live bug — REST `importance_min` filtering after the SQL limit. Each was
-verified against the live database or the source before being accepted.
+live bug — REST `importance_min` filtering after the SQL limit. R5 → R6:
+merge collisions did not say which provenance wins, and an applied marker
+fsynced *before* commit could authorise an undo that clobbers an unrelated
+writer. Each was verified against the live database or the source before being
+accepted.
 
 ## Measured current state (2026-08-10, live cluster)
 
@@ -382,7 +385,11 @@ Safety, in order:
    backup. Header record: `{schema_version, database, created_at}`, where
    `schema_version` is an **application constant plus a hash of the expected
    column signature** read from `information_schema` (there is no ledger table
-   by design — see §4). A mismatch blocks `--undo` unless `--force`.
+   by design — see §4). `--undo` compares the header's `database` identity against the live
+   `DatabaseConfig` **before writing anything**, and refuses on a missing or
+   mismatched identity unless `--force` — recording the identity is useless if
+   nothing checks it, and ids and CAS values can match in a restored or copied
+   database. A schema-version mismatch blocks `--undo` on the same terms.
    Per row: `{id, before_tags, before_tag_sources, after_tags,
    after_tag_sources, content_hash, source, at}`.
 4. **Forward CAS on the full recomputation input:** `id`, `content`, `source`,
@@ -391,10 +398,29 @@ Safety, in order:
    mutating, so it lists *planned* changes. If a forward CAS then skips a row
    because another writer independently produced the same `after_*` state,
    a later undo would match that state and clobber the other writer's work.
-   Each row therefore gets a durable **applied marker**: the CAS
-   `UPDATE ... RETURNING` runs inside a transaction, the marker is appended and
-   fsynced before commit, and undo considers only marked rows. A marker whose
-   commit then failed is harmless, because undo's own CAS will not match.
+   Each row therefore gets a durable **applied marker**, appended and fsynced
+   **after** the CAS `UPDATE ... RETURNING` transaction commits — not before.
+   Revision 5 had it backwards: a marker fsynced before a commit that then
+   fails records an application that never happened, and if any later writer
+   independently produces the recorded `after_*` state, undo matches and
+   destroys that writer's work. That is not the ABA case below; the retag
+   simply never committed.
+
+   Ordering it after commit inverts the failure into the safe direction: a
+   crash between commit and marker leaves a row mutated but unmarked, so undo
+   **skips** it rather than risking an unrelated writer's work.
+
+   `--undo --dry-run` reports **every** planned row that carries no marker,
+   regardless of its current state — reporting only those still matching
+   `after_*` would make the gap invisible the moment such a row is edited
+   again. Each is listed with its `before_*` values so it can be restored by
+   hand, and `--force` will apply them.
+
+   **This weakens goal 4 and is recorded as such**: the guarantee is not
+   "every mutation is reversible" but *"every committed mutation is either
+   automatically reversible or explicitly reported as needing manual
+   restoration."* The unrecoverable window is one crash between a row's commit
+   and its marker fsync, on a manually invoked single-user command.
 6. **Undo is also CAS**, against `after_tags`, `after_tag_sources`, **and
    `source` plus `md5(content)` evaluated in SQL**, not hashed in Python and
    compared afterwards — that would leave a check-then-write race. `md5()` is
@@ -484,8 +510,13 @@ Three changes, together:
    provenance `user` for every tag the caller explicitly submits. Explicit
    submission *is* user intent; recording it as `entity` was the bug.
 2. **Preserve on content-only updates.** When `tags` is omitted, the
-   recomputed automatic tags are **merged over** the retained `user` and
-   unknown-provenance tags rather than replacing them. Because this is a
+   recomputed automatic tags are merged with the retained `user` and
+   unknown-provenance tags rather than replacing them. **Protected provenance
+   wins every collision:** if `python` is stored as `user` and recomputation
+   emits `python` as `keyword`, the stored `user` provenance is kept. Letting
+   the automatic value win would silently downgrade a user tag to `keyword`,
+   and a later retag would then be entitled to remove it — laundering a
+   protected tag into a removable one. Because this is a
    read-modify-write, it is done under `SELECT ... FOR UPDATE` in one
    transaction — otherwise a concurrent explicit tag update can be read,
    overwritten, and lost between the read and the write.
@@ -528,7 +559,16 @@ raises a distinct `SchemaMismatchError`. The MCP server lets it escape and
 exits non-zero. The API **cannot** do that and still answer — an exception
 escaping the lifespan means no server to serve 503 — so it catches only this
 exception, records an explicit not-ready state, and serves `/health` as 503
-while every database-backed endpoint returns 503 until migration runs. Verified afterwards, not
+while every database-backed endpoint returns 503 until migration runs.
+
+**Recovery must not require a restart.** A not-ready state that is only
+evaluated at startup leaves the API 503 forever after a successful migration.
+The recheck therefore lives in the **shared readiness guard**, not in
+`/health`: any blocked database request re-runs the schema check once the
+10-second cache has expired, and clears the not-ready state as soon as the
+columns validate. Putting it only in `/health` would leave ordinary traffic
+stuck indefinitely unless something happened to poll that endpoint. Running
+`openbrain migrate` is sufficient; restarting the API is not required. Verified afterwards, not
 assumed: run `openbrain backup` post-migration and confirm it still verifies.
 
 ## Configuration
