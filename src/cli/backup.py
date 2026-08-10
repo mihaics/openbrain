@@ -30,7 +30,7 @@ class VerificationError(RuntimeError):
 # Object identities the dump is expected to contain. An entry outside this
 # set means the schema drifted, and the run fails loudly rather than
 # half-verifying against stale expectations.
-# The 19 object identities this database's dump contains, compared by exact
+# The 22 object identities this database's dump contains, compared by exact
 # equality. Owner and numeric ids are stripped by _toc_identity first.
 #
 # Derive this set empirically, do not hand-edit it:
@@ -57,8 +57,15 @@ EXPECTED_TOC_ENTRIES = {
     "INDEX public idx_memory_tags openbrain",
     "DEFAULT ACL public DEFAULT PRIVILEGES FOR SEQUENCES postgres",
     "DEFAULT ACL public DEFAULT PRIVILEGES FOR TABLES postgres",
+    # capture_state, added for auto-capture's restore interlock. These three
+    # identities were read from `pg_restore -l` on a real dump after creating
+    # the table, not predicted - a table contributes its definition, its data
+    # and its primary-key constraint.
+    "TABLE public capture_state openbrain",
+    "TABLE DATA public capture_state openbrain",
+    "CONSTRAINT public capture_state capture_state_pkey openbrain",
 }
-assert len(EXPECTED_TOC_ENTRIES) == 19
+assert len(EXPECTED_TOC_ENTRIES) == 22
 
 
 def _pg_restore_list(archive: Path) -> str:

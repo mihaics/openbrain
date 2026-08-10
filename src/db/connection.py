@@ -229,6 +229,8 @@ def validate_schema() -> None:
         )
         found = {r["column_name"]: r for r in cursor.fetchall()}
 
+    _validate_capture_state()
+
     for name, (dtype, nullable, default) in REQUIRED_COLUMNS.items():
         row = found.get(name)
         if row is None:
@@ -250,3 +252,64 @@ def validate_schema() -> None:
                 f"memory.{name} default is {row['column_default']!r}, "
                 f"expected one containing {default!r}"
             )
+
+
+CAPTURE_STATE_COLUMNS = {
+    "id": "smallint",
+    "generation": "bigint",
+    "previous_generation": "bigint",
+    "committed_work_identity": "jsonb",
+    "reprocess_counter": "bigint",
+    "active_reprocess": "jsonb",
+    "updated_at": "timestamp without time zone",
+}
+
+
+def _validate_capture_state() -> None:
+    """capture_state must exist, have the right shape, and hold exactly one row.
+
+    Existence is not enough: the restore interlock compares a generation held
+    here against a filesystem checkpoint, so a table with the wrong columns -
+    or with zero or several rows - would make that comparison meaningless
+    while looking healthy.
+    """
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT column_name, data_type, is_nullable
+              FROM information_schema.columns
+             WHERE table_name = 'capture_state'
+            """
+        )
+        found = {r["column_name"]: r for r in cursor.fetchall()}
+
+    if not found:
+        raise SchemaMismatchError(
+            "capture_state is missing - run `openbrain migrate`"
+        )
+
+    for name, dtype in CAPTURE_STATE_COLUMNS.items():
+        row = found.get(name)
+        if row is None:
+            raise SchemaMismatchError(
+                f"capture_state.{name} is missing - run `openbrain migrate`"
+            )
+        if row["data_type"] != dtype:
+            raise SchemaMismatchError(
+                f"capture_state.{name} is {row['data_type']}, expected {dtype}"
+            )
+
+    for name in ("id", "generation", "reprocess_counter", "updated_at"):
+        if found[name]["is_nullable"] != "NO":
+            raise SchemaMismatchError(
+                f"capture_state.{name} must be NOT NULL"
+            )
+
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT count(*) AS n FROM capture_state")
+        row = cursor.fetchone()
+    count = row["n"] if isinstance(row, dict) else row[0]
+    if count != 1:
+        raise SchemaMismatchError(
+            f"capture_state must hold exactly one row, found {count}"
+        )

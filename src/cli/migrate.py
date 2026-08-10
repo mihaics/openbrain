@@ -18,6 +18,17 @@ SKIP_SCHEMA_BARRIER = True
 MIGRATION_SQL = """
 ALTER TABLE memory ADD COLUMN IF NOT EXISTS access_count INT NOT NULL DEFAULT 0;
 ALTER TABLE memory ADD COLUMN IF NOT EXISTS last_accessed_at TIMESTAMP;
+""" + """
+CREATE TABLE IF NOT EXISTS capture_state (
+    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    generation BIGINT NOT NULL DEFAULT 1,
+    previous_generation BIGINT,
+    committed_work_identity JSONB,
+    reprocess_counter BIGINT NOT NULL DEFAULT 0,
+    active_reprocess JSONB,
+    updated_at TIMESTAMP NOT NULL DEFAULT now()
+);
+INSERT INTO capture_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 """
 
 

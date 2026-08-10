@@ -27,6 +27,9 @@ REAL_TOC = "\n".join([
     "3641; 1259 17002 INDEX public idx_memory_tags openbrain",
     "2279; 826 17003 DEFAULT ACL public DEFAULT PRIVILEGES FOR SEQUENCES postgres",
     "2280; 826 17004 DEFAULT ACL public DEFAULT PRIVILEGES FOR TABLES postgres",
+    "222; 1259 26638 TABLE public capture_state openbrain",
+    "3802; 0 26638 TABLE DATA public capture_state openbrain",
+    "3653; 2606 26653 CONSTRAINT public capture_state capture_state_pkey openbrain",
 ])
 
 
@@ -363,3 +366,37 @@ class TestBackupDirOverride:
 
         monkeypatch.delenv("OPENBRAIN_BACKUP_DIR", raising=False)
         assert backup_store.resolve_backup_dir() == Path.home() / "backups" / "openbrain"
+
+
+class TestCaptureStateInAllowlist:
+    """capture_state's TOC entries were read from a real dump, not predicted."""
+
+    def test_allowlist_count_matches_the_set(self):
+        from src.cli.backup import EXPECTED_TOC_ENTRIES
+
+        assert len(EXPECTED_TOC_ENTRIES) == 22
+
+    def test_dump_with_capture_state_verifies(self, tmp_path):
+        from src.cli.backup import verify_archive
+
+        archive = tmp_path / "a.dump"
+        archive.write_bytes(b"fake")
+
+        with patch('src.cli.backup._pg_restore_list', return_value=REAL_TOC), \
+             patch('src.cli.backup._pg_restore_decode'):
+            verify_archive(archive)
+
+    def test_dump_without_capture_state_is_rejected(self, tmp_path):
+        """A dump predating the migration must fail, not pass quietly."""
+        from src.cli.backup import VerificationError, verify_archive
+
+        archive = tmp_path / "a.dump"
+        archive.write_bytes(b"fake")
+        old_toc = "\n".join(
+            l for l in REAL_TOC.splitlines() if "capture_state" not in l
+        )
+
+        with patch('src.cli.backup._pg_restore_list', return_value=old_toc), \
+             patch('src.cli.backup._pg_restore_decode'):
+            with pytest.raises(VerificationError, match="missing expected"):
+                verify_archive(archive)

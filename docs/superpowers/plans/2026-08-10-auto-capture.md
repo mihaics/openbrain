@@ -1,4 +1,4 @@
-# OpenBrain Auto-Capture — Implementation Plan (revision 7)
+# OpenBrain Auto-Capture — Implementation Plan (revision 8)
 
 **Source spec:** `docs/superpowers/specs/2026-08-10-auto-capture-design.md`
 (**revision 5**, passed). Spec owns design; this plan owns sequencing, file
@@ -300,9 +300,9 @@ narrowed.**
       on disk. The worker would initialize the checkpoint, trust those future
       watermarks, and silently skip everything the restore lost.
 
-      Initialization is therefore an **explicit command**, run under the drain
-      lock before the timer or hook is enabled, and it refuses unless **both**
-      sides are clean:
+      Initialization is therefore an explicit command — **`capture
+      --init-state`** — run under the drain lock before the timer or hook is
+      enabled, and it refuses unless **both** sides are clean:
 
       - **Filesystem:** no progress, no `.processing` or deferred claims, no
         retry counters, no dead letters, no reprocess state, no reconcile
@@ -312,7 +312,14 @@ narrowed.**
         `active_reprocess` null, and zero `claude-code-auto` rows.
 
       Anything else refuses and directs the operator to `capture --reconcile`.
-- [ ] **8.2c** Tests: crashes on **both sides** of the checkpoint write, and a
+- [ ] **8.2c** Implement **`capture --init-state`** and test it: succeeds on a
+      genuinely clean install; **refuses** for each dirty condition
+      individually — leftover progress, a `.processing` claim, a deferred
+      claim, a retry counter, a dead letter, reprocess state, a reconcile
+      intent, a non-1 generation, a non-null committed identity, a non-zero
+      reprocess counter, or any existing `claude-code-auto` row — and names
+      which condition blocked it, directing the operator to `--reconcile`.
+- [ ] **8.2d** Tests: crashes on **both sides** of the checkpoint write, and a
       drain refused when the checkpoint is ahead of the database.
 - [ ] **8.3** Ceiling, with the actual values rather than a promise to state
       them. The day is **UTC by the database clock** — the laptop runs
@@ -428,8 +435,11 @@ narrowed.**
 `src/cli/capture.py`, tests
 
 - [ ] **10.1** Timer every 15 minutes with `Nice` and `MemoryMax`, installed
-      by tracked symlink, `daemon-reload`, `enable --now`, `Persistent`,
-      non-overlapping, with a service timeout. Noted: `MemoryMax` bounds the
+      by tracked symlink, `daemon-reload`, `Persistent`, non-overlapping, with
+      a service timeout. **Installation does not enable the timer** — since a
+      missing checkpoint now always makes `--drain` refuse, enabling before
+      `capture --init-state` guarantees the first invocation exits non-zero.
+      Enabling is Task 11's step, after initialization. Noted: `MemoryMax` bounds the
       worker, **not** the separately running Ollama daemon.
 - [ ] **10.2** `--install-hook` / `--uninstall-hook` take an **explicit
       settings-file selector**, since the rollout installs into one persona.
@@ -452,11 +462,13 @@ narrowed.**
       discard.
 - [ ] **11.3** Miss the target → tune prompt or caps and repeat. Nothing is
       enabled on impression.
-- [ ] **11.4** Install the timer with the hook uninstalled; confirm the queue
-      stays empty.
-- [ ] **11.5** Install the hook for one persona, one allowlisted project, for
+- [ ] **11.4** Run **`capture --init-state`** and confirm it succeeds; this
+      must precede enabling anything.
+- [ ] **11.5** Install **and enable** the timer with the hook still
+      uninstalled; confirm the first drain exits 0 and the queue stays empty.
+- [ ] **11.6** Install the hook for one persona, one allowlisted project, for
       a **stated observation duration**.
-- [ ] **11.6** Review what landed; widen only if precision holds.
+- [ ] **11.7** Review what landed; widen only if precision holds.
 
 ---
 
