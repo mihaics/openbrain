@@ -1,4 +1,4 @@
-# OpenBrain Retrieval Quality — Design (revision 7)
+# OpenBrain Retrieval Quality — Design (revision 9)
 
 Scope: sub-project 2 of 4. Sub-project 1 (reliability bundle) shipped
 2026-08-10. Sub-projects 3 (auto-capture) and 4 (transcript-search MCP)
@@ -59,7 +59,9 @@ the Go language.
 2. The lexical arm fires on natural-language queries.
 3. Recency, importance, and usage adjust ordering by a bounded, tested amount.
 4. Meaningful tag vocabulary, with a **precisely stated** guarantee about
-   which tags are protected (§5) and every mutation reversible.
+   which tags are protected (§5), and every committed mutation either
+   automatically reversible or explicitly reported as needing manual
+   restoration (§3.2).
 5. Verifiable: tests assert behaviour and boundaries, plus an explain mode.
 
 ## Non-goals
@@ -413,8 +415,23 @@ Safety, in order:
    `--undo --dry-run` reports **every** planned row that carries no marker,
    regardless of its current state — reporting only those still matching
    `after_*` would make the gap invisible the moment such a row is edited
-   again. Each is listed with its `before_*` values so it can be restored by
-   hand, and `--force` will apply them.
+   again.
+
+   Unmarked plans are reported as **indeterminate and are never restored
+   automatically — not even when the row still matches `after_*`.** The
+   absence of a marker has three causes the file cannot distinguish: the
+   mutation committed but crashed before its marker, the forward CAS skipped
+   the row, or the run stopped before reaching it. Matching `after_*` does not
+   disambiguate them, because the documented reason a forward CAS skips a row
+   is precisely that *another writer independently produced that same state* —
+   so "restore it if it matches `after_*`" would destroy that writer's change,
+   which is the exact failure applied markers exist to prevent.
+
+   `--undo` therefore lists every unmarked plan with its `before_*` values and
+   exits without touching them; `--force` does not override this. Closing the
+   gap properly needs a durable database-side operation identity, which would
+   mean a second schema change and a new TOC entry — deliberately not taken
+   for a single-user tool, and recorded as an accepted risk instead.
 
    **This weakens goal 4 and is recorded as such**: the guarantee is not
    "every mutation is reversible" but *"every committed mutation is either
@@ -425,12 +442,22 @@ Safety, in order:
    `source` plus `md5(content)` evaluated in SQL**, not hashed in Python and
    compared afterwards — that would leave a check-then-write race. `md5()` is
    core PostgreSQL; `sha256()` would need an extension and therefore a TOC
-   entry. Conflicts are skipped and reported unless `--force`. The undo file has **two record types** —
-   `{"type":"plan",...}` and `{"type":"applied","id":...}` — because a marker
-   necessarily repeats its plan's id and a blanket duplicate-id rule would
-   reject valid files. Validation requires: exactly one `plan` per id, at most
-   one `applied` per id, and every `applied` referencing an existing `plan`.
-   The whole file is validated before the first write.
+   entry. Conflicts are skipped and reported unless `--force`.
+
+   The undo file has **two record types** — `{"type":"plan",...}` and
+   `{"type":"applied","id":...}` — because a marker necessarily repeats its
+   plan's id and a blanket duplicate-id rule would reject valid files.
+   Validation requires: exactly one `plan` per id, at most one `applied` per
+   id, and every `applied` referencing an existing `plan`.
+
+   **An incomplete final record is discarded, not fatal.** Appends to a
+   regular file are not crash-atomic, so a crash mid-marker can leave a
+   partial trailing line. Rejecting the whole file for that would block undo
+   of every earlier, correctly marked mutation — the opposite of what a safety
+   net is for. Validation therefore discards a truncated *final* record and
+   proceeds; a malformed record anywhere else is still fatal. Any append or
+   fsync failure aborts the run immediately rather than continuing to mutate
+   rows it can no longer record.
    **Accepted residual risk:** this is value-based CAS, so an intervening
    writer that changes a row and restores exactly the same values (ABA) is
    undetectable. Adding a row-version column would close it and is deliberately
@@ -615,7 +642,7 @@ use site; MCP tests take symbols from `src.main`.
 | Access | `memory_get` increments, `memory_search` does not; REST GET does not; both annotations flipped; failure swallowed; kill switch |
 | Reranker | bypassed when the query has no text, and `candidate_n` narrows with it; missing indices appended in SQL order; duplicate/out-of-range/NaN rejected wholesale; `top_n < limit` fills to `limit`; unreachable ⇒ unchanged order |
 | Tagger | each sufficient alias; each qualified context with and without its bare token; negatives: "go build a prototype", "I need to go test it", "frontend" alone; `nodejs` single canonical spelling **for generated tags only**, so a user-owned legacy `node` survives |
-| Retag | user and unknown-provenance tags survive; explicit-tag-update-then-retag; provenance-only difference is selected; CAS conflict skipped; content edit then undo refused without `--force`; truncated undo file rejected before first write; concurrent run blocked by lock |
+| Retag | user and unknown-provenance tags survive; explicit-tag-update-then-retag; provenance-only difference is selected; CAS conflict skipped; content edit then undo refused without `--force`; malformed mid-file record rejected before first write, truncated *final* record discarded and undo still proceeds; unmarked plans reported indeterminate and never restored automatically, including when the row still matches after_*; concurrent run blocked by lock |
 | Migration | pre-existing column with wrong type/nullability/default fails loudly; `migrate` itself is exempt from the barrier; API serves 503 rather than failing to start |
 | REST filters | `importance_min` reaches SQL: a search with a restrictive minimum returns a full page, not a short one |
 | Undo format | plan and applied markers coexist for one id; missing plan or duplicate marker rejected |
