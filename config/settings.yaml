@@ -52,10 +52,11 @@ ranking:
 
 capture:
   # Auto-capture is opt-in twice: globally, and per project.
-  enabled: false
-  projects: []
+  enabled: true
+  projects:
+    - /home/mihai/tools/open-brain
   model: qwen3:4b
-  model_digest: ""
+  model_digest: "359d7dd4bcdab3d8"
   prompt_version: "1"
   ollama_url: http://127.0.0.1:11434
   num_ctx: 16384

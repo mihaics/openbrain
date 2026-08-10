@@ -187,16 +187,20 @@ class TestSecrets:
 
 
 class TestModelPinning:
+    def _tags(self, name="qwen3:4b", digest="cafebabe1234"):
+        r = Mock()
+        r.raise_for_status = Mock()
+        r.json.return_value = {"models": [{"name": name, "digest": digest}]}
+        return r
+
     def test_digest_mismatch_is_refused(self):
         """Checking only that the name exists lets a retagged model change
         behaviour while metadata records the pinned digest."""
         from src.capture.extract import verify_model
 
-        r = Mock()
-        r.raise_for_status = Mock()
-        r.json.return_value = {"details": {"digest": "deadbeef"}}
-        with patch('src.capture.extract.requests.post', return_value=r):
-            ok, detail = verify_model(_cfg(model_digest="cafebabe"))
+        with patch('src.capture.extract.requests.get',
+                   return_value=self._tags(digest="deadbeef")):
+            ok, detail = verify_model(_cfg(model="qwen3:4b", model_digest="cafebabe"))
 
         assert ok is False
         assert "digest" in detail
@@ -204,13 +208,31 @@ class TestModelPinning:
     def test_matching_digest_passes(self):
         from src.capture.extract import verify_model
 
-        r = Mock()
-        r.raise_for_status = Mock()
-        r.json.return_value = {"details": {"digest": "cafebabe1234"}}
-        with patch('src.capture.extract.requests.post', return_value=r):
-            ok, _ = verify_model(_cfg(model_digest="cafebabe"))
+        with patch('src.capture.extract.requests.get', return_value=self._tags()):
+            ok, _ = verify_model(_cfg(model="qwen3:4b", model_digest="cafebabe"))
 
         assert ok is True
+
+    def test_missing_model_is_refused(self):
+        from src.capture.extract import verify_model
+
+        with patch('src.capture.extract.requests.get',
+                   return_value=self._tags(name="something-else")):
+            ok, detail = verify_model(_cfg(model="qwen3:4b", model_digest="cafebabe"))
+
+        assert ok is False
+        assert "not installed" in detail
+
+    def test_pinned_digest_with_none_reported_is_refused(self):
+        """Reading the digest from the wrong endpoint returns empty, which
+        would make the pin silently vacuous."""
+        from src.capture.extract import verify_model
+
+        with patch('src.capture.extract.requests.get',
+                   return_value=self._tags(digest="")):
+            ok, detail = verify_model(_cfg(model="qwen3:4b", model_digest="cafebabe"))
+
+        assert ok is False
 
 
 class TestEndpointPinning:

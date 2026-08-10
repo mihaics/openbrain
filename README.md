@@ -261,6 +261,59 @@ under compare-and-set so a concurrently edited memory is skipped rather than
 clobbered. `--undo` is exempt from the backup gate, because it must work in
 exactly the emergency where the backup is stale.
 
+
+## Auto-Capture
+
+A Claude Code `Stop` hook records that a session has new turns; a timer drains
+the queue every 15 minutes, asks a local model for durable facts, and stores
+the survivors as `source="claude-code-auto"`.
+
+```bash
+openbrain capture --status
+openbrain capture --scan-recent 5      # extract from recent transcripts, write nothing
+openbrain capture --drain --dry-run    # show candidates for queued sessions
+openbrain capture --install-hook ~/.claude/settings.json
+openbrain capture --sync-hook-config   # after changing capture settings
+```
+
+**Opt-in twice.** `capture.enabled` must be true *and* the session's directory
+must appear in `capture.projects`. An empty allowlist captures nothing. The
+hook reads a small JSON artifact (`~/.local/state/openbrain/capture-hook.json`)
+because it is stdlib-only and cannot parse YAML — regenerate it with
+`--sync-hook-config` after any settings change.
+
+**What gets captured.** Decisions and why, gotchas and their cause, stated
+preferences, resolved root causes. A fact is stored only if a quote supporting
+it appears **verbatim** in the transcript the model was shown; the quote itself
+is then discarded. Most sessions produce nothing, and that is the intended
+outcome — the bar is deliberately set so silence is cheaper than noise.
+
+**Secrets.** Credential-shaped and high-entropy strings are redacted before
+anything reaches the model, and candidates are re-scanned before storage. The
+endpoint is pinned to loopback. Bulk removal covers the **live database only**:
+
+```bash
+# via MCP: memory_bulk_delete with sources=["claude-code-auto"], confirm=true
+```
+
+It does not touch retained `pg_dump` archives, WAL, or dead tuples, so a
+credential that reached the store must be rotated regardless of deletion.
+
+**After restoring the database**, capture progress on disk will be ahead of it
+and the worker refuses to drain rather than silently skipping the rows the
+restore lost:
+
+```bash
+systemctl --user stop openbrain-capture.timer
+# restore the database
+openbrain capture --reconcile
+systemctl --user start openbrain-capture.timer
+```
+
+`openbrain capture --init-state` initializes the generation checkpoint on a
+clean install; it refuses if any capture state or any `claude-code-auto` row
+already exists, and points at `--reconcile` instead.
+
 ## REST API
 
 Common endpoints:
@@ -320,6 +373,7 @@ openbrain backup --status
 openbrain get <memory-id>       # fetch one memory; counts as an access
 openbrain migrate               # apply additive schema changes
 openbrain retag --dry-run       # preview tag cleanup
+openbrain capture --status      # auto-capture state
 ```
 
 ## Configuration
