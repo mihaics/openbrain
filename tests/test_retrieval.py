@@ -217,3 +217,118 @@ class TestSqlValidityAgainstLivePostgres:
                 )
         finally:
             self._cleanup(integration_db)
+
+
+class TestBlending:
+    def test_null_created_at_is_not_maximally_recent(self):
+        """GREATEST(NULL, 0) returns 0 in PostgreSQL, so a naive age
+        expression gives an undated memory exp(0) = 1.0 - the freshest
+        possible score. It must be 0 instead."""
+        sql, _ = _capture_sql(query="alpha", embedding=EMB, limit=5)
+
+        assert "created_at IS NULL THEN 0" in sql.replace("m.", "")
+
+    def test_access_ratio_is_not_integer_divided(self):
+        """LEAST(7,10)/10 evaluates to 0 in PostgreSQL."""
+        sql, _ = _capture_sql(query="alpha", embedding=EMB, limit=5)
+        assert "double precision" in sql
+
+    def test_access_is_clamped_on_both_sides(self):
+        sql, _ = _capture_sql(query="alpha", embedding=EMB, limit=5)
+        assert "GREATEST(COALESCE(m.access_count, 0), 0)" in sql
+
+    def test_importance_is_clamped(self):
+        sql, _ = _capture_sql(query="alpha", embedding=EMB, limit=5)
+        assert "LEAST(GREATEST(COALESCE(m.importance" in sql
+
+    def test_rel_norm_coalesces_a_degenerate_pool(self):
+        """An all-zero rel_raw set would make MAX() 0 and every score NULL,
+        silently falling through to timestamp ordering."""
+        sql, _ = _capture_sql(query="alpha", embedding=EMB, limit=5)
+        assert "COALESCE(" in sql and "MAX(" in sql and "OVER ()" in sql
+
+    def test_no_signal_branch_is_not_blended(self):
+        sql, _ = _capture_sql(query="", limit=5)
+        assert "OVER ()" not in sql
+
+
+class TestBlendingBoundary:
+    """The bound is what makes 'secondary signals break near-ties' true."""
+
+    def _score(self, rel_norm, recency=0.0, imp=0.0, acc=0.0):
+        from src.config.ranking import RankingConfig
+
+        cfg = RankingConfig(config_data={})
+        return (rel_norm + cfg.w_rec * recency + cfg.w_imp * imp
+                + cfg.w_acc * acc)
+
+    def test_gap_above_bound_cannot_flip(self):
+        """rel gap 0.2 > 0.10: even a maximal secondary advantage loses."""
+        weak_but_favoured = self._score(0.80, recency=1.0, imp=1.0, acc=1.0)
+        strong_but_stale = self._score(1.00)
+
+        assert strong_but_stale > weak_but_favoured
+
+    def test_gap_below_bound_can_flip(self):
+        """rel gap 0.05 < 0.10: the near-tie breaker is allowed to act."""
+        fresh = self._score(0.95, recency=1.0, imp=1.0, acc=1.0)
+        stale = self._score(1.00)
+
+        assert fresh > stale
+
+    def test_bound_is_enforced_not_assumed(self):
+        from src.config.ranking import RankingConfig
+
+        cfg = RankingConfig(config_data={})
+        assert cfg.secondary_total <= 0.10 + 1e-9
+
+
+@pytest.mark.integration
+class TestExplainAgainstLivePostgres:
+    def _seed(self, connection):
+        import uuid as uuid_mod
+        with connection.get_db_cursor() as cursor:
+            for i in range(4):
+                cursor.execute(
+                    """
+                    INSERT INTO memory (id, source, content, embedding, importance)
+                    VALUES (%s, 'test', %s, %s::vector, %s)
+                    """,
+                    (str(uuid_mod.uuid4()), f"backup verification note {i}",
+                     [0.1 + i * 0.01] * 1024, 0.4 + i * 0.1),
+                )
+
+    def _cleanup(self, connection):
+        with connection.get_db_cursor() as cursor:
+            cursor.execute("DELETE FROM memory WHERE source = 'test'")
+
+    def test_components_sum_to_the_final_score(self, integration_db):
+        """If the breakdown does not reconstruct the score, it explains
+        nothing."""
+        from src.db import queries
+
+        try:
+            self._seed(integration_db)
+            rows = queries.search_memories(
+                "backup verification", embedding=[0.1] * 1024, limit=4, explain=True,
+            )
+            assert rows
+            for row in rows:
+                e = row["explain"]
+                total = sum(e["contribution"].values())
+                assert total == pytest.approx(e["final"], abs=1e-6)
+                assert e["branch"] == "hybrid"
+        finally:
+            self._cleanup(integration_db)
+
+    def test_top_result_has_rel_norm_one(self, integration_db):
+        from src.db import queries
+
+        try:
+            self._seed(integration_db)
+            rows = queries.search_memories(
+                "backup verification", embedding=[0.1] * 1024, limit=4, explain=True,
+            )
+            assert max(r["explain"]["rel_norm"] for r in rows) == pytest.approx(1.0)
+        finally:
+            self._cleanup(integration_db)

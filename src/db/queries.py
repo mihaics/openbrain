@@ -8,6 +8,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .connection import get_db_cursor, get_vector_dim
 
+# This module is loaded under two identities: `src.db.queries` by the CLI and
+# tests, and `db.queries` by src/main.py and src/api/main.py, which put src/ on
+# sys.path first. Under the latter the parent package is `db`, so a `..config`
+# relative import reaches beyond the top-level package and fails. Both spellings
+# are tried rather than "fixing" the repo's mixed import style here.
+try:
+    from ..config.ranking import RankingConfig
+except ImportError:  # pragma: no cover - exercised by the MCP/API import path
+    from config.ranking import RankingConfig
+
 
 JSON_MEMORY_FIELDS = ("entities", "metadata", "tag_sources")
 
@@ -158,6 +168,40 @@ def _like_pattern(query: str) -> str:
 # tsquery, so no injection surface is introduced.
 _TSQUERY_EXPR = "replace(plainto_tsquery('english', %s)::text, ' & ', ' | ')::tsquery"
 
+
+# Blending fragments. Every input is clamped in SQL because none is
+# guaranteed by the schema: importance is nullable and unconstrained,
+# created_at can be NULL or future-dated, access_count is an integer.
+_RECENCY_EXPR = """CASE WHEN m.created_at IS NULL THEN 0
+             ELSE exp(-ln(2) * GREATEST(EXTRACT(EPOCH FROM (NOW() - m.created_at)) / 86400.0, 0) / %s)
+        END"""
+# GREATEST(NULL, 0) is 0 in PostgreSQL, so without the explicit NULL case an
+# undated memory would score exp(0) = 1.0: maximally recent.
+_IMPORTANCE_EXPR = "LEAST(GREATEST(COALESCE(m.importance, 0.5), 0), 1)"
+# LEAST(7,10)/10 is integer division and evaluates to 0, hence the cast.
+_ACCESS_EXPR = ("LEAST(GREATEST(COALESCE(m.access_count, 0), 0), %s)"
+                "::double precision / %s")
+
+
+def _blend_select(rel_expr: str) -> str:
+    """Score = normalized relevance plus bounded secondary signals.
+
+    rel_norm is COALESCE'd because an all-zero relevance pool - every cosine
+    similarity clamped to zero, say - makes MAX() zero, every ratio NULL and
+    every score NULL, which silently falls through to timestamp ordering.
+    """
+    return f"""COALESCE({rel_expr} / NULLIF(MAX({rel_expr}) OVER (), 0), 0)
+                   + %s * ({_RECENCY_EXPR})
+                   + %s * ({_IMPORTANCE_EXPR})
+                   + %s * ({_ACCESS_EXPR})"""
+
+
+def _blend_params(cfg) -> list:
+    """Parameters for _blend_select, in the order they appear."""
+    return [cfg.w_rec, cfg.half_life_days, cfg.w_imp,
+            cfg.w_acc, cfg.access_cap, cfg.access_cap]
+
+
 MEMORY_COLUMNS = """m.id, m.source, m.source_id, m.content, m.raw_content,
                    m.entities, m.tags, m.tag_sources, m.importance, m.created_at,
                    m.original_date, m.language, m.metadata"""
@@ -174,6 +218,7 @@ def search_memories(
     date_to: Optional[datetime] = None,
     importance_min: Optional[float] = None,
     importance_max: Optional[float] = None,
+    explain: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Hybrid search: PostgreSQL full-text OR-of-lexemes fused with pgvector
@@ -223,6 +268,7 @@ def search_memories(
     if has_vector:
         embedding = _validate_embedding(embedding)
 
+    cfg = RankingConfig.get_instance()
     pool = max(limit * 4, 20)
 
     if has_text and has_vector:
@@ -256,16 +302,23 @@ def search_memories(
                        COALESCE(1.0 / (60 + vec.rank_vec), 0) AS rel_raw
                 FROM fts FULL OUTER JOIN vec ON fts.id = vec.id
             )
-            SELECT {MEMORY_COLUMNS}, fused.rel_raw AS score
+            SELECT {MEMORY_COLUMNS},
+                   {_blend_select('fused.rel_raw')} AS score,
+                   fused.rel_raw AS rel_raw,
+                   COALESCE(fused.rel_raw / NULLIF(MAX(fused.rel_raw) OVER (), 0), 0) AS rel_norm
             FROM fused JOIN memory m ON m.id = fused.id
-            ORDER BY fused.rel_raw DESC NULLS LAST,
+            ORDER BY score DESC NULLS LAST,
                      m.created_at DESC NULLS LAST, m.id
             LIMIT %s
         """
         like = _like_pattern(query)
+        # Parameter order follows the order placeholders appear in the SQL
+        # text: the tsquery CTE, then each arm, then the outer SELECT's blend
+        # terms, then the final limit.
         params_final = (
             [query] + filter_params + [like, pool]
             + [embedding] + filter_params + [pool]
+            + _blend_params(cfg)
             + [limit]
         )
 
@@ -273,7 +326,10 @@ def search_memories(
         query_sql = f"""
             WITH tsq AS (SELECT {_TSQUERY_EXPR} AS q)
             SELECT {MEMORY_COLUMNS},
-                   ts_rank_cd(to_tsvector('english', m.content), tsq.q) AS score
+                   {_blend_select("ts_rank_cd(to_tsvector('english', m.content), tsq.q)")} AS score,
+                   ts_rank_cd(to_tsvector('english', m.content), tsq.q) AS rel_raw,
+                   COALESCE(ts_rank_cd(to_tsvector('english', m.content), tsq.q)
+                            / NULLIF(MAX(ts_rank_cd(to_tsvector('english', m.content), tsq.q)) OVER (), 0), 0) AS rel_norm
             FROM memory m, tsq
             WHERE ({filter_clause})
               AND tsq.q != ''::tsquery
@@ -284,18 +340,23 @@ def search_memories(
                      m.created_at DESC NULLS LAST, m.id
             LIMIT %s
         """
-        params_final = [query] + filter_params + [_like_pattern(query), limit]
+        params_final = ([query] + _blend_params(cfg) + filter_params
+                        + [_like_pattern(query), limit])
 
     elif has_vector:
         query_sql = f"""
             SELECT {MEMORY_COLUMNS},
-                   1.0 - (m.embedding <=> %s::vector) AS score
+                   {_blend_select('GREATEST(1.0 - (m.embedding <=> %s::vector), 0)')} AS score
             FROM memory m
             WHERE ({filter_clause}) AND m.embedding IS NOT NULL
-            ORDER BY m.embedding <=> %s::vector, m.id
+            ORDER BY score DESC NULLS LAST, m.created_at DESC NULLS LAST, m.id
             LIMIT %s
         """
-        params_final = [embedding] + filter_params + [embedding, limit]
+        # rel_expr appears twice in _blend_select (the value and the MAX
+        # window), so the embedding parameter is supplied twice, and both
+        # precede the blend terms in the SQL text.
+        params_final = ([embedding, embedding] + _blend_params(cfg)
+                        + filter_params + [limit])
 
     else:
         query_sql = f"""
@@ -312,13 +373,57 @@ def search_memories(
         cursor.execute(query_sql, params_final)
         results = cursor.fetchall()
 
+    branch = ("hybrid" if (has_text and has_vector)
+              else "text-only" if has_text
+              else "vector-only" if has_vector else "no-signal")
+
     memories = []
     for row in results:
         mem = _decode_memory_row(row)
         mem['score'] = float(row.get('score') or 0)
+        if explain:
+            mem['explain'] = _explain_components(row, cfg, branch)
         memories.append(mem)
 
     return memories
+
+
+def _explain_components(row: Any, cfg, branch: str) -> Dict[str, Any]:
+    """Per-result score breakdown.
+
+    Secondary components are recomputed here from the row's own fields rather
+    than selected again in SQL: the inputs are already returned, the formula
+    is fixed, and repeating the expressions would add placeholders whose
+    ordering is exactly what broke the first blended query.
+    """
+    import math
+
+    created = row.get("created_at")
+    if created is None:
+        recency = 0.0
+    else:
+        age_days = max((datetime.now(created.tzinfo) - created).total_seconds() / 86400.0, 0)
+        recency = math.exp(-math.log(2) * age_days / cfg.half_life_days)
+
+    importance = min(max(row.get("importance") if row.get("importance") is not None else 0.5, 0), 1)
+    access = min(max(row.get("access_count") or 0, 0), cfg.access_cap) / cfg.access_cap
+    rel_norm = float(row.get("rel_norm") or 0)
+
+    return {
+        "branch": branch,
+        "rel_raw": float(row.get("rel_raw") or 0) if row.get("rel_raw") is not None else None,
+        "rel_norm": rel_norm,
+        "recency": recency,
+        "importance": float(importance),
+        "access": access,
+        "contribution": {
+            "relevance": rel_norm,
+            "recency": cfg.w_rec * recency,
+            "importance": cfg.w_imp * float(importance),
+            "access": cfg.w_acc * access,
+        },
+        "final": float(row.get("score") or 0),
+    }
 
 
 def get_memory_by_id(memory_id: uuid.UUID) -> Optional[Dict[str, Any]]:

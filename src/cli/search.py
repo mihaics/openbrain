@@ -33,13 +33,31 @@ def search_memories_cmd(args: Namespace) -> int:
     results = search_memories(
         query=query,
         embedding=embedding,
+        explain=getattr(args, 'explain', False),
         limit=limit,
         **filters
     )
     
-    # Output
+    # Output. Explain fields live behind the flag and on their own line, so
+    # ordinary `--json` output keeps the shape existing consumers expect.
+    explain = getattr(args, 'explain', False)
     if args.json:
         print(json.dumps(results, indent=2, default=str))
+    elif explain:
+        if not results:
+            print("No memories found.")
+            return 0
+        for mem in results:
+            e = mem.get('explain') or {}
+            c = e.get('contribution', {})
+            print(f"[{e.get('final', 0):.4f}] {mem.get('content', '')[:64]}")
+            print(f"    branch={e.get('branch')} rel_raw={e.get('rel_raw')} "
+                  f"rel_norm={e.get('rel_norm', 0):.4f}")
+            print(f"    relevance={c.get('relevance', 0):.4f} "
+                  f"recency={c.get('recency', 0):.4f} (r={e.get('recency', 0):.3f}) "
+                  f"importance={c.get('importance', 0):.4f} "
+                  f"access={c.get('access', 0):.4f}")
+            print("-" * 40)
     else:
         if not results:
             print("No memories found.")

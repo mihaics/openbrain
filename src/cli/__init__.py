@@ -22,6 +22,8 @@ def main():
     search_parser.add_argument('--source', '-s', help='Filter by source')
     search_parser.add_argument('--tag', '-t', help='Filter by tag')
     search_parser.add_argument('--json', action='store_true', help='Output as JSON')
+    search_parser.add_argument('--explain', action='store_true',
+                               help='Show per-result score components')
     
     # Store command
     store_parser = subparsers.add_parser('store', help='Store a new memory')
