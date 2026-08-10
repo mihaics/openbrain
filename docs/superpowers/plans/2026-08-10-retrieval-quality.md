@@ -1,4 +1,4 @@
-# OpenBrain Retrieval Quality — Implementation Plan (revision 3)
+# OpenBrain Retrieval Quality — Implementation Plan (revision 4)
 
 **Source spec:** `docs/superpowers/specs/2026-08-10-retrieval-quality-design.md`
 (**revision 9**, passed adversarial review). The spec owns every design
@@ -47,36 +47,51 @@ Tasks 4, 5, 7, 9 have `-m integration` steps, and **the `openbrain` role
 cannot create a database** — `rolcreatedb` is `f` (verified). Without this
 task those steps cannot run at all.
 
-**Ordering:** this task is numbered 0 because it gates the integration steps,
-but it is **executed after Task 2**. `schema.sql` uses
-`CREATE TABLE IF NOT EXISTS`, which does **not** add columns to an existing
-table, so provisioning before Task 2 would leave the test database without
-`access_count`/`last_accessed_at` and every Task 5/7 integration test would
-fail against a stale schema. Task 2 therefore runs `openbrain migrate` against
-**both** databases.
+**Ordering — linear, no cycle.** Revision 3 had Task 0 run after Task 2 while
+Task 2 migrated a database Task 0 had not yet created. The sequence is:
 
-**One-time, requires sudo. Every command targets the 5433 cluster explicitly** —
-`sudo -u postgres createdb` with no `-h/-p` goes to the local socket on 5432,
-which is a different cluster:
+```
+Task 2: implement + unit tests + full suite
+      → migrate PRODUCTION → verify openbrain backup → commit
+Task 0: provision openbrain_test → run `openbrain migrate` against it
+      → add the fixture → commit
+```
+
+Task 2 migrates production only. `openbrain_test` is migrated here, by this
+task, right after it is created. `schema.sql` uses
+`CREATE TABLE IF NOT EXISTS`, which does **not** add columns to an existing
+table, so the migrate step is required rather than optional.
+
+**One-time, requires sudo.** The superuser commands use `-p 5433` **without
+`-h`**, so they reach the right cluster over the Unix socket under peer
+authentication. Adding `-h 127.0.0.1` would force TCP, where `sudo -u postgres`
+supplies no credential at all and SCRAM host rules reject the connection —
+and omitting `-p` entirely would silently target a different cluster on 5432.
 
 ```bash
-sudo -u postgres createdb -h 127.0.0.1 -p 5433 -O openbrain openbrain_test
-sudo -u postgres psql -h 127.0.0.1 -p 5433 -d openbrain_test \
+sudo -u postgres createdb -p 5433 -O openbrain openbrain_test
+sudo -u postgres psql -p 5433 -d openbrain_test \
   -c 'CREATE EXTENSION "uuid-ossp"' -c 'CREATE EXTENSION vector'
 # operator's own shell, one-off provisioning - not application code, so the
 # DatabaseConfig-only rule does not apply here:
-PGPASSWORD="$(read -rsp 'openbrain password: ' p; echo "$p")" \
-  psql -h 127.0.0.1 -p 5433 -U openbrain -d openbrain_test -f src/db/schema.sql
-DB_NAME=openbrain_test .venv/bin/openbrain migrate
+read -rsp 'openbrain password: ' PGPASSWORD; export PGPASSWORD
+psql -h 127.0.0.1 -p 5433 -U openbrain -d openbrain_test -f src/db/schema.sql
+DB_NAME=openbrain_test .venv/bin/openbrain migrate    # adds the two columns
+unset PGPASSWORD
 ```
 
 - [ ] **0.1** Provision as above, then confirm
       `psql ... -d openbrain_test -c '\d memory'` shows both new columns.
-- [ ] **0.2** Add the `integration` fixture in `tests/conftest.py`: reset
-      `DatabaseConfig._instance` **and** the global pool, point `DB_NAME` at
-      `openbrain_test`, then assert `SELECT current_database()` on the live
-      connection. Setting the env var proves nothing while a singleton and a
-      pool are already bound elsewhere.
+- [ ] **0.2** Add the `integration` fixture in `tests/conftest.py`. It must
+      handle **both database-module identities**: `src/main.py` and
+      `src/api/main.py` load `db.connection` while the CLI and tests load
+      `src.db.connection`, and each carries its own `DatabaseConfig._instance`
+      and pool. Resetting one and asserting on its connection proves nothing
+      about a committed mutation routed through the other. The fixture
+      therefore walks `sys.modules` for **every** loaded identity, closes each
+      pool and clears each singleton, points `DB_NAME` at `openbrain_test`,
+      and asserts `SELECT current_database()` **on the connection the code
+      under test actually mutates through**.
 - [ ] **0.3** The fixture **fails** — never skips — when `-m integration` was
       explicitly requested and the database is absent, and fails if
       `current_database()` returns the production name. A silent skip would
@@ -139,10 +154,9 @@ identity and retag refuses to run until the next nightly.
 - [ ] **2.8** **Full suite green first**, then run `openbrain migrate` against
       the live database, then **`openbrain backup` and confirm it still
       verifies** (columns must not alter the 19-entry TOC). Migrating before
-      the suite passes mutates the schema on unverified code. **Then migrate
-      `openbrain_test` too** (`DB_NAME=openbrain_test openbrain migrate`) once
-      Task 0 has provisioned it — otherwise the integration tests run against
-      a schema without the columns they exercise.
+      the suite passes mutates the schema on unverified code. **Production
+      only** — `openbrain_test` does not exist yet and is migrated by Task 0,
+      which runs next.
 - [ ] **2.9** Commit: `feat(db): add access columns with validated migration`
 
 ---
@@ -357,7 +371,13 @@ The only destructive task. Everything in spec §3.2 is load-bearing.
 - [ ] **9.4** Gate tests: retag refuses with no backup, a stale backup, a
       **future-dated** backup, and a mismatched database identity; `--undo`
       alone is exempt from the age gate.
-- [ ] **9.5** Full suite. Commit the implementation — `feat(cli): add retag
+- [ ] **9.5** **Integration test end to end on `openbrain_test`**, not just
+      mocked units: seed disposable rows, run a real backfill, and exercise
+      the forward CAS, the committed mutation, the applied-marker protocol and
+      the undo CAS against live PostgreSQL — including a CAS conflict and an
+      undo round-trip. Without this the destructive production run in 9-OPS
+      would be the first time any of that machinery touches a real database.
+- [ ] **9.6** Full suite. Commit the implementation — `feat(cli): add retag
       backfill with undo` — **before** any live run.
 
 ---
@@ -397,9 +417,11 @@ committing the code that performs it.
       trusted); absent indices keep SQL order and are appended; duplicate,
       out-of-range, NaN or infinite scores reject the response wholesale;
       non-object entries and more results than documents rejected; request
-      size caps enforced; `top_n < limit` still fills to `limit`; final result
-      cardinality is exactly `limit` after a fallback; unreachable ⇒ unchanged
-      order.
+      size caps enforced; `top_n < limit` still fills toward `limit`; final result
+      cardinality is **`min(limit, candidate_count)` with no duplication** —
+      "exactly `limit`" is impossible when filters or corpus size yield fewer
+      candidates, and fill-to-limit applies only when at least `limit`
+      candidates exist; unreachable ⇒ unchanged order.
 - [ ] **10.1b** Candidate widening (`pool`/`candidate_n` on
       `rerank_applicable`) and application-side truncation land **in this
       task, atomically with the reranker**, plus the `rerank_score` /
@@ -446,11 +468,11 @@ the only one that rewrites existing rows, and it carries the undo file.
 | After | Must hold |
 | --- | --- |
 | Every code task | Full suite green **before** commit — 123 passed baseline plus that task's new tests |
-| Task 2 | `openbrain backup` still verifies (TOC unchanged); both databases migrated |
-| Task 0 | `\d memory` on `openbrain_test` shows both columns; fixture fails, not skips, when the database is missing |
+| Task 2 | `openbrain backup` still verifies (TOC unchanged); production migrated (test DB is Task 0's) |
+| Task 0 | `\d memory` on `openbrain_test` shows both columns after its own migrate step; fixture resets **every** loaded db-module identity and fails, not skips, when the database is missing |
 | Task 4 | All four branches valid SQL; fixed probe queries match recorded ids and order |
 | Task 5 | A row outside the pre-blend limit is demonstrably promoted |
 | Task 8 | `auto` unreachable from settings, generated config, and `TagConfig` default; API restarted; **every MCP client restarted**; no-`auto` check run against `openbrain_test` |
-| Task 9 | Implementation committed **before** any live run |
+| Task 9 | End-to-end integration test on `openbrain_test` passes; implementation committed **before** any live run |
 | Task 9-OPS | Verified backup carrying database identity; dry-run counts reviewed; after the run, every mutated row has an applied marker, none indeterminate, and every `user`/unknown-provenance tag from `before_tag_sources` is still present with protected provenance |
 | Task 11 | Every documented command executed; destructive examples only against `openbrain_test` |
