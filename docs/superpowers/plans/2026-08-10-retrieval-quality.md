@@ -1,4 +1,4 @@
-# OpenBrain Retrieval Quality — Implementation Plan (revision 4)
+# OpenBrain Retrieval Quality — Implementation Plan (revision 5)
 
 **Source spec:** `docs/superpowers/specs/2026-08-10-retrieval-quality-design.md`
 (**revision 9**, passed adversarial review). The spec owns every design
@@ -114,6 +114,12 @@ identity and retag refuses to run until the next nightly.
 - [ ] **1.2** Add the field in both the success and `.unverified` manifest
       paths (recovery needs it as much as a clean dump).
 - [ ] **1.3** `status_report` surfaces `newest_database_identity`.
+- [ ] **1.3b** Make the backup root overridable via `OPENBRAIN_BACKUP_DIR`
+      (falling back to `~/backups/openbrain`), and derive the retag lock,
+      `.retag-sequence` and undo paths from the same root. Without this, any
+      test-database backfill would read production manifests — failing
+      identity validation — and would write its lock, sequence and undo files
+      into the production retag namespace. Tested.
 - [ ] **1.4** Full suite green; run `openbrain backup` for real and confirm
       the new dump's `.json` contains the field and still verifies.
 - [ ] **1.5** Commit: `feat(backup): record database identity in the manifest`
@@ -372,7 +378,13 @@ The only destructive task. Everything in spec §3.2 is load-bearing.
       **future-dated** backup, and a mismatched database identity; `--undo`
       alone is exempt from the age gate.
 - [ ] **9.5** **Integration test end to end on `openbrain_test`**, not just
-      mocked units: seed disposable rows, run a real backfill, and exercise
+      mocked units. Prerequisites, because forward retag demands a fresh
+      verified backup whose manifest identity matches the target database:
+      point `OPENBRAIN_BACKUP_DIR` at a temporary directory, run
+      `DB_NAME=openbrain_test openbrain backup` there so the manifest carries
+      the test identity, and only then invoke retag — so the run never reads a
+      production manifest nor touches the production lock, sequence or undo
+      files. Then seed disposable rows, run a real backfill, and exercise
       the forward CAS, the committed mutation, the applied-marker protocol and
       the undo CAS against live PostgreSQL — including a CAS conflict and an
       undo round-trip. Without this the destructive production run in 9-OPS
@@ -446,7 +458,10 @@ committing the code that performs it.
       sub-project 1 lesson — but **destructive examples (`retag`, `retag
       --undo`) run only against `openbrain_test`**. Against production, verify
       with `--help` and `--dry-run` only. A documentation check must not be
-      able to rewrite the corpus.
+      able to rewrite the corpus. Destructive examples also run with
+      `OPENBRAIN_BACKUP_DIR` pointed at a temporary directory, for the same
+      reason as Task 9.5 — otherwise a documentation check writes into the
+      production retag namespace.
 - [ ] **11.4** Commit: `docs: describe retrieval behaviour and new commands`
 
 ---
@@ -473,6 +488,6 @@ the only one that rewrites existing rows, and it carries the undo file.
 | Task 4 | All four branches valid SQL; fixed probe queries match recorded ids and order |
 | Task 5 | A row outside the pre-blend limit is demonstrably promoted |
 | Task 8 | `auto` unreachable from settings, generated config, and `TagConfig` default; API restarted; **every MCP client restarted**; no-`auto` check run against `openbrain_test` |
-| Task 9 | End-to-end integration test on `openbrain_test` passes; implementation committed **before** any live run |
+| Task 9 | End-to-end integration test on `openbrain_test` passes, run under an isolated `OPENBRAIN_BACKUP_DIR` with its own identity-bearing verified backup; implementation committed **before** any live run |
 | Task 9-OPS | Verified backup carrying database identity; dry-run counts reviewed; after the run, every mutated row has an applied marker, none indeterminate, and every `user`/unknown-provenance tag from `before_tag_sources` is still present with protected provenance |
 | Task 11 | Every documented command executed; destructive examples only against `openbrain_test` |
