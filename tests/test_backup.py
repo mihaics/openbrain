@@ -283,3 +283,83 @@ class TestLock:
                 with pytest.raises(RuntimeError, match="another backup"):
                     with backup.acquire_lock(tmp_path):
                         pass
+
+
+class TestManifestDatabaseIdentity:
+    """The manifest identifies which database the dump came from.
+
+    Without it, a reused backup directory can gate a retag of database B on a
+    verified dump of database A.
+    """
+
+    def _run(self, tmp_path, verify_side_effect=None):
+        from src.cli import backup
+
+        cm = patch('src.cli.backup.verify_archive', side_effect=verify_side_effect)
+        with patch('src.cli.backup.subprocess.run', side_effect=fake_subprocess_run), \
+             patch('src.cli.backup.snapshot_metadata', return_value=FAKE_SNAPSHOT_META), \
+             patch('src.cli.backup.get_db_connection'), \
+             cm:
+            return backup.take_dump(tmp_path, seq=1)
+
+    def test_success_manifest_records_identity(self, tmp_path):
+        from src.db.connection import DatabaseConfig
+
+        _dump, manifest = self._run(tmp_path)
+        config = DatabaseConfig.get_instance()
+
+        assert manifest["database"] == {
+            "host": config.host, "port": config.port, "name": config.name,
+        }
+
+    def test_manifest_never_contains_the_password(self, tmp_path):
+        import json as jsonlib
+        from src.db.connection import DatabaseConfig
+
+        _dump, manifest = self._run(tmp_path)
+        password = DatabaseConfig.get_instance().password
+
+        assert password
+        assert password not in jsonlib.dumps(manifest)
+
+    def test_unverified_manifest_also_records_identity(self, tmp_path):
+        """Recovery from a bad archive needs the identity as much as a good one."""
+        from src.cli import backup_store
+        from src.cli.backup import VerificationError
+
+        with pytest.raises(VerificationError):
+            self._run(tmp_path, verify_side_effect=VerificationError("corrupt"))
+
+        unverified = list(tmp_path.glob("*.unverified"))
+        manifest = backup_store.read_manifest(unverified[0])
+        assert manifest["database"]["name"]
+
+    def test_status_report_surfaces_identity(self, tmp_path):
+        from src.cli import backup
+
+        dump, _manifest = self._run(tmp_path)
+        report = backup.status_report(tmp_path)
+
+        assert report["newest_database_identity"]["name"]
+
+
+class TestBackupDirOverride:
+    """OPENBRAIN_BACKUP_DIR relocates the backup root.
+
+    Scope here is the resolver only: src/cli/retag.py does not exist yet, so
+    the lock/sequence/undo wiring is asserted in its own task.
+    """
+
+    def test_env_override_wins(self, tmp_path, monkeypatch):
+        from src.cli import backup_store
+
+        monkeypatch.setenv("OPENBRAIN_BACKUP_DIR", str(tmp_path / "elsewhere"))
+        assert backup_store.resolve_backup_dir() == tmp_path / "elsewhere"
+
+    def test_defaults_to_home_backups(self, monkeypatch):
+        from pathlib import Path
+
+        from src.cli import backup_store
+
+        monkeypatch.delenv("OPENBRAIN_BACKUP_DIR", raising=False)
+        assert backup_store.resolve_backup_dir() == Path.home() / "backups" / "openbrain"

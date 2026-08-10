@@ -241,6 +241,16 @@ def snapshot_metadata(conn) -> Dict[str, Any]:
     }
 
 
+def database_identity(config: DatabaseConfig) -> Dict[str, Any]:
+    """Which database a dump came from. Never includes the password.
+
+    The retag gate compares this against the live configuration: a reused
+    backup directory could otherwise gate a destructive backfill of one
+    database on a verified dump of another.
+    """
+    return {"host": config.host, "port": config.port, "name": config.name}
+
+
 def _pg_dump_version() -> str:
     out = subprocess.run(["pg_dump", "--version"], capture_output=True, text=True)
     return out.stdout.strip()
@@ -293,6 +303,7 @@ def take_dump(backup_dir: Path, seq: int) -> Tuple[Path, Dict[str, Any]]:
         # every bit as much as a clean one does.
         store.write_manifest(store.manifest_path(unverified), {
             "sequence": seq,
+            "database": database_identity(config),
             "dump_started": started.isoformat(),
             "dump_finished": failed_at.isoformat(),
             "snapshot_id": meta["snapshot_id"],
@@ -316,6 +327,7 @@ def take_dump(backup_dir: Path, seq: int) -> Tuple[Path, Dict[str, Any]]:
     finished = datetime.now(timezone.utc)
     manifest = {
         "sequence": seq,
+        "database": database_identity(config),
         "dump_started": started.isoformat(),
         "dump_finished": finished.isoformat(),
         "snapshot_id": meta["snapshot_id"],
@@ -362,6 +374,7 @@ def status_report(backup_dir: Path) -> Dict[str, Any]:
 
     newest_age = None
     newest_rows = None
+    newest_identity = None
     if verified:
         verified.sort(key=lambda p: store.parse_dump_name(p)[0], reverse=True)
         newest = verified[0]
@@ -371,6 +384,7 @@ def status_report(backup_dir: Path) -> Dict[str, Any]:
             age = datetime.now(timezone.utc) - datetime.fromisoformat(decoded)
             newest_age = age.total_seconds()
         newest_rows = manifest.get("row_count")
+        newest_identity = manifest.get("database")
 
     # Newest archive age, verified or not: sub-project 3 needs to distinguish
     # "no backup ran" from "a backup ran and failed verification".
@@ -403,6 +417,7 @@ def status_report(backup_dir: Path) -> Dict[str, Any]:
         "newest_archive_age_seconds": newest_archive_age,
         "newest_verified_age_seconds": newest_age,
         "newest_row_count": newest_rows,
+        "newest_database_identity": newest_identity,
         "last_failure": last_failure,
         "total_bytes": sum(p.stat().st_size for p in dumps if p.exists()),
         "healthy": newest_age is not None and newest_age < STALE_AFTER_SECONDS,

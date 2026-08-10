@@ -17,9 +17,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-BACKUP_DIR = Path.home() / "backups" / "openbrain"
+DEFAULT_BACKUP_DIR = Path.home() / "backups" / "openbrain"
 SEQUENCE_FILE = "sequence"
 KEEP_COUNT = 60
+
+
+def resolve_backup_dir() -> Path:
+    """Where backups live: OPENBRAIN_BACKUP_DIR, else ~/backups/openbrain.
+
+    The override exists so a test-database backfill cannot read production
+    manifests or write its lock, sequence and undo files into the production
+    retag namespace. Resolved per call rather than captured at import, so a
+    test that sets the variable is not defeated by import order.
+    """
+    override = os.environ.get("OPENBRAIN_BACKUP_DIR")
+    return Path(override) if override else DEFAULT_BACKUP_DIR
+
+
+BACKUP_DIR = resolve_backup_dir()
 
 _NAME_RE = re.compile(
     r"^openbrain-(?P<seq>\d+)-(?P<ts>\d{8}T\d{6}\.\d{6})Z\.dump$"
