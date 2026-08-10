@@ -55,11 +55,20 @@ Two systemd --user services, plus the system PostgreSQL cluster:
 ```bash
 systemctl --user status openbrain-api openbrain-web openbrain-backup.timer
 systemctl --user restart openbrain-api
-journalctl --user -u openbrain-backup.service -n 50
+tail -n 50 ~/.local/state/openbrain/backup.log
 ```
 
 Unit files are tracked in `deploy/systemd/` and installed by symlink into
-`~/.config/systemd/user/`.
+`~/.config/systemd/user/`; the tmpfiles rule that creates the log directory
+is `deploy/tmpfiles/openbrain.conf`, symlinked into `~/.config/user-tmpfiles.d/`.
+
+**Why the backup logs to a file, not the journal.** On this machine journald
+is running on the runtime journal only — `/var/log/journal` has not been
+written since 2026-01-28 and no user journal is live — so
+`journalctl --user -u <unit>` returns nothing for any user service, and a
+failing nightly backup would leave no trace. The unit redirects stdout and
+stderr to `~/.local/state/openbrain/backup.log` instead. If persistent
+journaling is ever repaired system-wide, that redirect can go away.
 
 MCP is not exposed over HTTP. Run the MCP server as a stdio process from your
 MCP client.

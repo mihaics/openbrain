@@ -1,6 +1,13 @@
 # OpenBrain Reliability Bundle Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: complete (2026-08-10).** All 12 tasks executed and merged to
+> `main`. Two defects the plan did not anticipate were found afterwards and
+> fixed: undeclared `nltk` plus an unbounded `mcp` dependency that resolves to
+> the incompatible 2.x (caught by CI on a clean install), and the backup unit
+> logging to a journal that does not exist on this machine (caught by actually
+> running the documented command).
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Give OpenBrain a verified nightly backup, eliminate every code path that can write a corrupt or stale embedding, make the test suite runnable, and make the repository describe how the system actually runs.
 
@@ -118,19 +125,19 @@ Existing `tests/test_core.py` uses the older top-level style; leave it alone.
 - Consumes: nothing
 - Produces: a working `.venv/bin/pytest`; the `integration` marker used by later tasks
 
-- [ ] **Step 1: Install dev extras into the existing venv**
+- [x] **Step 1: Install dev extras into the existing venv**
 
 ```bash
 cd /home/mihai/tools/open-brain
 .venv/bin/pip install -e ".[dev]"
 ```
 
-- [ ] **Step 2: Confirm the suite passes**
+- [x] **Step 2: Confirm the suite passes**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: `46 passed`. If anything fails, stop and report — the baseline is known-green, so a failure means the install changed behavior and must be understood before proceeding.
 
-- [ ] **Step 3: Add pytest configuration**
+- [x] **Step 3: Add pytest configuration**
 
 Append to `pyproject.toml`:
 
@@ -144,12 +151,12 @@ markers = [
 addopts = "-m 'not integration'"
 ```
 
-- [ ] **Step 4: Confirm configuration takes effect**
+- [x] **Step 4: Confirm configuration takes effect**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: `46 passed`, and no warning about unknown markers or unset `asyncio_mode`.
 
-- [ ] **Step 5: Add `tests/conftest.py`**
+- [x] **Step 5: Add `tests/conftest.py`**
 
 `src/main.py` inserts the **repo root** on `sys.path` (its
 `dirname(dirname(__file__))` resolves one level higher than `src/api/main.py`'s
@@ -177,7 +184,7 @@ sys.path.insert(0, REPO_ROOT)
 Create it at `tests/conftest.py`. This is the **only** place `sys.path` is touched;
 individual test files must not.
 
-- [ ] **Step 6: Add the CI workflow**
+- [x] **Step 6: Add the CI workflow**
 
 Create `.github/workflows/test.yml`:
 
@@ -202,7 +209,7 @@ jobs:
 
 No service containers: the suite is fully mocked and needs neither PostgreSQL nor Ollama.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add pyproject.toml .github/workflows/test.yml tests/conftest.py
@@ -230,7 +237,7 @@ deselected by default, and a workflow running unit tests on push."
 
 **Design note:** `expected_dim` is a parameter rather than an internal `get_vector_dim()` call. The embedder must not import the DB layer — the repo's mixed import styles mean a cross-package import would break either the CLI or the MCP/API path, and an embedder knowing about Postgres is the wrong boundary anyway. DB-connected callers pass `get_vector_dim()` using whatever import idiom already works in their module.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_embedding_integrity.py`:
 
@@ -327,12 +334,12 @@ class TestEmbedBatchNullPropagation:
         assert [0.0] * 1024 not in result
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_embedding_integrity.py -v`
 Expected: FAIL — `ImportError: cannot import name 'EmbeddingError' from 'embedder'`, and the batch tests failing on the zero-vector assertion.
 
-- [ ] **Step 3: Add `EmbeddingError` and `create_validated_embedding`**
+- [x] **Step 3: Add `EmbeddingError` and `create_validated_embedding`**
 
 In `src/embedder/__init__.py`, after the existing `create_embeddings` convenience function:
 
@@ -390,7 +397,7 @@ def create_validated_embedding(
     return embedding
 ```
 
-- [ ] **Step 4: Fix `embed_batch` in `OllamaEmbedder`**
+- [x] **Step 4: Fix `embed_batch` in `OllamaEmbedder`**
 
 Replace the body at `src/embedder/__init__.py:330-341`:
 
@@ -419,7 +426,7 @@ Replace the body at `src/embedder/__init__.py:330-341`:
 
 Add `import sys` to the module imports if absent, and `Optional` to the `typing` import.
 
-- [ ] **Step 5: Update the `create_embeddings` signature**
+- [x] **Step 5: Update the `create_embeddings` signature**
 
 ```python
 def create_embeddings(texts: List[str]) -> List[Optional[List[float]]]:
@@ -430,17 +437,17 @@ def create_embeddings(texts: List[str]) -> List[Optional[List[float]]]:
     return get_embedder().embed_batch(texts)
 ```
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_embedding_integrity.py -v`
 Expected: all 8 PASS.
 
-- [ ] **Step 7: Confirm no regression**
+- [x] **Step 7: Confirm no regression**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: all green, no failures (46 baseline plus the new tests).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/embedder/__init__.py tests/test_embedding_integrity.py
@@ -474,7 +481,7 @@ converts a degraded embedding into a lost memory."
 
 **Why raise rather than auto-NULL:** auto-NULLing would silently discard a valid embedding a caller meant to supply, and hide the mistake. Only the two handlers update content, and both are changed in Task 4 to pass an embedding explicitly.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_embedding_integrity.py`:
 
@@ -577,12 +584,12 @@ class TestValidateEmbedding:
 
 Add `import uuid` to the test file's imports.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_embedding_integrity.py -k "Sentinel or ValidateEmbedding" -v`
 Expected: FAIL — `_validate_embedding` does not exist; content-without-embedding does not raise.
 
-- [ ] **Step 3: Rename and extend the validator**
+- [x] **Step 3: Rename and extend the validator**
 
 In `src/db/queries.py`, replace `_validate_embedding_dim`:
 
@@ -629,7 +636,7 @@ returns line 84 (`insert_memory`), **line 170 (`search_memories`)**, and line 38
 no existing test catches it because they all pass `embedding=None`. After editing, the
 grep must return only the definition.
 
-- [ ] **Step 4: Add the sentinel and invariant to `update_memory`**
+- [x] **Step 4: Add the sentinel and invariant to `update_memory`**
 
 Change the signature and the embedding branch:
 
@@ -676,17 +683,17 @@ def update_memory(
 
 Keep the remaining field branches unchanged.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_embedding_integrity.py -v`
 Expected: all PASS (8 from Task 2 + 8 new).
 
-- [ ] **Step 6: Confirm no regression**
+- [x] **Step 6: Confirm no regression**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: all green. If an existing test calls `_validate_embedding_dim` by name, update that test — the rename is intentional.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/db/queries.py tests/test_embedding_integrity.py
@@ -722,7 +729,7 @@ all-zero vectors, which previously passed the length-only check."
 | Update | Pass `embedding=None` to clear the stale vector |
 | Search | Leave the query embedding `None` → text-only search. Never raise |
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_embedding_integrity.py`:
 
@@ -895,12 +902,12 @@ class TestRestDegradation:
         assert mock_update.call_args.kwargs['embedding'] is None
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_embedding_integrity.py -k CallSite -v`
 Expected: FAIL — `cli.store` has no attribute `create_validated_embedding`.
 
-- [ ] **Step 3: Update `src/cli/store.py`**
+- [x] **Step 3: Update `src/cli/store.py`**
 
 ```python
 from ..db.connection import get_vector_dim
@@ -918,7 +925,7 @@ Replace the embedding block:
         print(f"Warning: storing without embedding: {e}", file=sys.stderr)
 ```
 
-- [ ] **Step 4: Update `src/cli/search.py`**
+- [x] **Step 4: Update `src/cli/search.py`**
 
 ```python
 from ..db.connection import get_vector_dim
@@ -936,7 +943,7 @@ from ..embedder import EmbeddingError, create_validated_embedding
 
 Ensure `search_memories` is called with `embedding=embedding` as a keyword argument.
 
-- [ ] **Step 5: Update the five connectors**
+- [x] **Step 5: Update the five connectors**
 
 In each of `gmail.py`, `file_watcher.py`, `claude_code.py`, `whatsapp.py`, `telegram.py`, replace the import:
 
@@ -957,7 +964,7 @@ and the call (variable name differs per file — `content`, `body`, `text`):
 
 Add `import sys` where absent. Keep each file's existing variable name.
 
-- [ ] **Step 6: Update `src/api/main.py`**
+- [x] **Step 6: Update `src/api/main.py`**
 
 Imports (top-level style — `src` is on `sys.path` in this module):
 
@@ -1017,7 +1024,7 @@ async def update_memory_endpoint(memory_id: str, update: MemoryUpdate):
 
 Add `from extractors.entities import extract_entities` and `from extractors.tagger import auto_tag` if absent. Note `embedding=embedding` passes `None` on failure, which now means "clear it" — exactly the intent.
 
-- [ ] **Step 7: Update `src/main.py`**
+- [x] **Step 7: Update `src/main.py`**
 
 Import: `from embedder import EmbedderConfig, EmbeddingError, create_validated_embedding`
 
@@ -1061,11 +1068,11 @@ Search handler (`~718`):
             print(f"Warning: text-only search: {e}", file=sys.stderr)
 ```
 
-- [ ] **Step 8: Remove the dead import**
+- [x] **Step 8: Remove the dead import**
 
 In `src/ingestion/importer.py`, delete line 12 (`from ..embedder import create_embeddings`). It has never been called — every import path inserts `embedding=None` (lines 69, 114, 157) under a comment claiming batching. Batching is out of scope; leave those inserts alone.
 
-- [ ] **Step 9: Run tests**
+- [x] **Step 9: Run tests**
 
 Run: `.venv/bin/python -m pytest tests/test_embedding_integrity.py -v`
 Expected: all PASS, including the five parametrized connector checks, the three MCP
@@ -1073,7 +1080,7 @@ degradation tests, and the two REST update tests. If an MCP test fails on import
 check that the patch target is `src.main.<name>` — patching `src.embedder.<name>`
 will not affect the name already bound into `src.main`'s namespace.
 
-- [ ] **Step 10: Verify no raw call sites remain**
+- [x] **Step 10: Verify no raw call sites remain**
 
 Run:
 ```bash
@@ -1087,14 +1094,14 @@ Expected: **no output.** The two allowed occurrences both live in
 excluded wholesale rather than by pattern. Filtering only on `def create_embedding`
 would flag the helper's own internal call and report a false violation.
 
-- [ ] **Step 11: Full suite**
+- [x] **Step 11: Full suite**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: all green. Exact counts are not asserted here — earlier tasks add tests, so
 a hardcoded total would be wrong by the time this runs. What matters: zero failures,
 and no test skipped other than `integration`-marked ones.
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit**
 
 ```bash
 git add src/main.py src/api/main.py src/cli/store.py src/cli/search.py \
@@ -1137,7 +1144,7 @@ import from the importer."
 - Abort after 3 consecutive `EmbeddingError`s, exit non-zero.
 - `flock` on `~/backups/openbrain/.reembed.lock` so two sweeps cannot interleave.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_reembed.py`:
 
@@ -1347,12 +1354,12 @@ class TestSelectionOrder:
         assert "ORDER BY created_at ASC, id ASC" in null_query
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_reembed.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'cli.reembed'`.
 
-- [ ] **Step 3: Implement `src/cli/reembed.py`**
+- [x] **Step 3: Implement `src/cli/reembed.py`**
 
 ```python
 """Re-embed memories with NULL or all-zero embeddings."""
@@ -1605,7 +1612,7 @@ def reembed_cmd(args: Namespace) -> int:
 
 Note: `get_db_cursor` commits per statement via the existing pool's context manager, satisfying the per-row commit requirement.
 
-- [ ] **Step 4: Register the subcommand**
+- [x] **Step 4: Register the subcommand**
 
 In `src/cli/__init__.py`, after the `report` parser:
 
@@ -1632,12 +1639,12 @@ and in the dispatch chain:
             return reembed_cmd(args)
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_reembed.py -v`
 Expected: all 4 PASS.
 
-- [ ] **Step 6: Dry-run against the live database only**
+- [x] **Step 6: Dry-run against the live database only**
 
 `--dry-run` writes nothing, so it is safe before a backup exists.
 
@@ -1654,7 +1661,7 @@ The live sweep is deferred to **Task 9, Step 7**, immediately after the first ve
 dump exists. Implementation and unit tests are complete here; only the production
 mutation moves.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/cli/reembed.py src/cli/__init__.py tests/test_reembed.py
@@ -1692,7 +1699,7 @@ than given a vector computed from stale text."
   - `select_for_deletion(backup_dir: Path, keep: int, current: Optional[Path]) -> List[Path]`
   - `KEEP_COUNT: int = 60`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_backup_store.py`:
 
@@ -1882,12 +1889,12 @@ class TestRetention:
         assert all(p.name.endswith(".dump") for p in doomed)
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_backup_store.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'cli.backup_store'`.
 
-- [ ] **Step 3: Implement `src/cli/backup_store.py`**
+- [x] **Step 3: Implement `src/cli/backup_store.py`**
 
 ```python
 """Filesystem primitives for OpenBrain backups.
@@ -2118,12 +2125,12 @@ def delete_dump(dump: Path) -> None:
     dump.unlink(missing_ok=True)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_backup_store.py -v`
 Expected: all 14 PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cli/backup_store.py tests/test_backup_store.py
@@ -2168,7 +2175,7 @@ DEFAULT ACL public DEFAULT PRIVILEGES FOR SEQUENCES postgres
 DEFAULT ACL public DEFAULT PRIVILEGES FOR TABLES postgres
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 **Create** `tests/test_backup.py` — this task establishes the file; Task 8 appends to
 it. The imports here must cover Task 8's needs too, so it does not have to restate
@@ -2298,12 +2305,12 @@ class TestVerification:
                 verify_archive(archive)
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_backup.py -k Verification -v`
 Expected: FAIL — `verify_archive` / `VerificationError` do not exist.
 
-- [ ] **Step 3: Implement verification**
+- [x] **Step 3: Implement verification**
 
 **Create** `src/cli/backup.py` with the module header and the verification half.
 Task 8 appends the dump half to this same file, so the imports below deliberately
@@ -2468,12 +2475,12 @@ def verify_archive(archive: Path) -> None:
     _pg_restore_decode(archive)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_backup.py -v`
 Expected: all 7 PASS.
 
-- [ ] **Step 5: Verify against a real archive**
+- [x] **Step 5: Verify against a real archive**
 
 ```bash
 cd /home/mihai/tools/open-brain
@@ -2490,7 +2497,7 @@ rm -f /tmp/verify-probe.dump
 ```
 Expected: `archive verified`. Delete the probe — it is a full plaintext copy of all memory content.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/cli/backup.py tests/test_backup.py
@@ -2525,7 +2532,7 @@ and all imports this task needs. Append only.
   - `pg_env(config) -> dict` — child environment carrying `PGPASSWORD`
   - `snapshot_metadata(conn) -> dict` — row count, dimension, snapshot id
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 **Append** to `tests/test_backup.py` (Task 7 created it with the needed imports):
 
@@ -2628,12 +2635,12 @@ class TestDumpInvocation:
             assert manifest[key], f"{key} missing from .unverified manifest"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_backup.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'cli.backup'`.
 
-- [ ] **Step 3: Append the dump half to `src/cli/backup.py`**
+- [x] **Step 3: Append the dump half to `src/cli/backup.py`**
 
 The module header, imports, and constants already exist from Task 7. Add these
 functions below the verification code:
@@ -2824,12 +2831,12 @@ def take_dump(backup_dir: Path, seq: int) -> Tuple[Path, Dict[str, Any]]:
 
 `verify_archive` and `VerificationError` already exist from Task 7, so nothing here is forward-declared. That ordering is deliberate: verification depends on nothing but `pg_restore`, while the dump depends on verification, so building it second means this task's tests can patch a symbol that genuinely exists.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_backup.py -v`
 Expected: 3 PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cli/backup.py tests/test_backup.py
@@ -2859,7 +2866,7 @@ would otherwise wait a full day for another chance."
 
 **Mode rules:** exactly one of default / `--verify-only` / `--status`. `--dry-run` valid with default only; `--json` valid with `--status` only. Anything else is a usage error.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_backup.py`:
 
@@ -2930,12 +2937,12 @@ class TestLock:
                         pass
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_backup.py -k "CliModes or Status or Lock" -v`
 Expected: FAIL — `backup_cmd`, `status_report`, `acquire_lock` do not exist.
 
-- [ ] **Step 3: Append the command surface to `src/cli/backup.py`**
+- [x] **Step 3: Append the command surface to `src/cli/backup.py`**
 
 `fcntl`, `jsonlib`, `Namespace`, `contextmanager`, and `STALE_AFTER_SECONDS` are
 already imported/defined from Task 7. Add these below the existing code:
@@ -3099,7 +3106,7 @@ def backup_cmd(args: Namespace) -> int:
         return 1
 ```
 
-- [ ] **Step 4: Register the subcommand**
+- [x] **Step 4: Register the subcommand**
 
 In `src/cli/__init__.py`, after the `reembed` parser:
 
@@ -3125,12 +3132,12 @@ and in the dispatch chain:
             return backup_cmd(args)
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_backup.py -v`
 Expected: all PASS.
 
-- [ ] **Step 6: Exercise it for real**
+- [x] **Step 6: Exercise it for real**
 
 ```bash
 cd /home/mihai/tools/open-brain
@@ -3143,7 +3150,7 @@ ls -la ~/backups/openbrain/                   # expect: dir 0700, dump+json 0600
 .venv/bin/openbrain backup --status --dry-run # expect: exit 2, usage error
 ```
 
-- [ ] **Step 7: Now run the deferred live reembed sweep (from Task 5)**
+- [x] **Step 7: Now run the deferred live reembed sweep (from Task 5)**
 
 A verified backup now exists, so the production mutation deferred from Task 5 is safe.
 
@@ -3165,12 +3172,12 @@ zero-vector rows present the sweep never exercises it:
 Expected: PASS. A failure means `array_fill(...)::vector` is wrong and Task 5's
 zero-repair path would break at runtime.
 
-- [ ] **Step 8: Full suite**
+- [x] **Step 8: Full suite**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: all green.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/cli/backup.py src/cli/__init__.py tests/test_backup.py
@@ -3199,7 +3206,7 @@ consume it without a redesign."
 
 **Why units live in the repo:** the existing `openbrain-api.service` and the orphan `openbrain-dashboard.service` are untracked, so deleting or changing them is unrecoverable. Tracked files installed by symlink fix that.
 
-- [ ] **Step 1: Create the service unit**
+- [x] **Step 1: Create the service unit**
 
 `deploy/systemd/openbrain-backup.service`:
 
@@ -3217,7 +3224,7 @@ Environment=PYTHONPATH=/home/mihai/tools/open-brain
 ExecStart=/home/mihai/tools/open-brain/.venv/bin/openbrain backup
 ```
 
-- [ ] **Step 2: Create the timer unit**
+- [x] **Step 2: Create the timer unit**
 
 `deploy/systemd/openbrain-backup.timer`:
 
@@ -3239,7 +3246,7 @@ WantedBy=timers.target
 
 `OnCalendar=02:30` local is DST-safe here: Europe/Bucharest transitions at 03:00 and 04:00, so 02:30 is never skipped or repeated.
 
-- [ ] **Step 3: Install by symlink**
+- [x] **Step 3: Install by symlink**
 
 ```bash
 ln -sf /home/mihai/tools/open-brain/deploy/systemd/openbrain-backup.service \
@@ -3250,7 +3257,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now openbrain-backup.timer
 ```
 
-- [ ] **Step 4: Verify the timer and one real run**
+- [x] **Step 4: Verify the timer and one real run**
 
 ```bash
 systemctl --user list-timers openbrain-backup.timer   # expect: next 02:30, Persistent
@@ -3268,7 +3275,7 @@ Confirm lingering is on, so the timer fires without an active login:
 loginctl show-user mihai --property=Linger    # expect: Linger=yes
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add deploy/systemd/openbrain-backup.service deploy/systemd/openbrain-backup.timer
@@ -3294,7 +3301,7 @@ unit, so readiness is handled by retry inside the command instead."
 
 **Interfaces:** none
 
-- [ ] **Step 1: Preserve the untracked orphan before deleting it**
+- [x] **Step 1: Preserve the untracked orphan before deleting it**
 
 ```bash
 mkdir -p deploy/systemd/attic
@@ -3304,7 +3311,7 @@ cp ~/.config/systemd/user/openbrain-dashboard.service \
 
 It is untracked, so without this copy the deletion is unrecoverable.
 
-- [ ] **Step 2: Confirm it is not in use, then remove it**
+- [x] **Step 2: Confirm it is not in use, then remove it**
 
 ```bash
 systemctl --user is-active openbrain-dashboard.service   # expect: inactive
@@ -3313,7 +3320,7 @@ rm ~/.config/systemd/user/openbrain-dashboard.service
 systemctl --user daemon-reload
 ```
 
-- [ ] **Step 3: Delete the Docker path**
+- [x] **Step 3: Delete the Docker path**
 
 ```bash
 git rm docker-compose.yml Dockerfile web/Dockerfile .dockerignore
@@ -3321,7 +3328,7 @@ git rm docker-compose.yml Dockerfile web/Dockerfile .dockerignore
 
 `docker-compose.yml` declared `pgvector/pgvector:pg16` with user `postgres` / password `openbrain` while reality is system PostgreSQL 18 with `openbrain` / `openbrain_local` — and it mapped host port 5433, so following the README would have collided with the live cluster.
 
-- [ ] **Step 4: Delete the stale operational scripts**
+- [x] **Step 4: Delete the stale operational scripts**
 
 ```bash
 git rm scripts/backup.sh scripts/healthcheck.sh scripts/startup.sh scripts/setup_db.py
@@ -3334,7 +3341,7 @@ git rm scripts/backup.sh scripts/healthcheck.sh scripts/startup.sh scripts/setup
 
 `scripts/remember.sh` and `scripts/check_db.py` stay — reviewed and still accurate.
 
-- [ ] **Step 5: Tighten credential file permissions**
+- [x] **Step 5: Tighten credential file permissions**
 
 ```bash
 chmod 600 config/settings.yaml .env
@@ -3343,7 +3350,7 @@ stat -c '%a %n' config/settings.yaml .env    # expect: 600 for both
 
 Both were `664` under world-traversable directories, so the database password was readable by any local user.
 
-- [ ] **Step 6: Confirm the services still run**
+- [x] **Step 6: Confirm the services still run**
 
 ```bash
 systemctl --user restart openbrain-api.service openbrain-web.service
@@ -3354,7 +3361,7 @@ curl -s http://localhost:8000/health          # expect: {"status":"healthy"}
 
 The permission change must not break the services, which run as the same user.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A deploy/systemd/attic
@@ -3380,11 +3387,11 @@ dashboard unit is preserved under deploy/systemd/attic before removal."
 
 **Interfaces:** none
 
-- [ ] **Step 1: Fix the MCP server docstring**
+- [x] **Step 1: Fix the MCP server docstring**
 
 `src/main.py` line 1-4 claims FastMCP. The server uses the low-level `mcp.server.Server` API (`from mcp.server import Server`, `@app.list_tools()`, `@app.call_tool()`). Correct the docstring to say so.
 
-- [ ] **Step 2: Rewrite the README's operational sections**
+- [x] **Step 2: Rewrite the README's operational sections**
 
 Replace the Docker quick-start with what this machine actually does. Required content:
 
@@ -3460,15 +3467,15 @@ For embedding-level damage specifically, `openbrain reembed` repairs rows
 in place and needs no restore at all.
 ```
 
-- [ ] **Step 3: Fix `.env.example`**
+- [x] **Step 3: Fix `.env.example`**
 
 Change `DB_PORT` to 5433 and `DB_USER` to `openbrain`, and note that `config/settings.yaml` is authoritative for the embedder.
 
-- [ ] **Step 4: Reconcile `requirements.txt`**
+- [x] **Step 4: Reconcile `requirements.txt`**
 
 `pyproject.toml` is the real dependency source (`pip install -e ".[dev]"`). Either delete `requirements.txt` or reduce it to a pointer at `pyproject.toml`. Do not leave two lists that can drift.
 
-- [ ] **Step 5: Mark `SPEC.md` historical**
+- [x] **Step 5: Mark `SPEC.md` historical**
 
 Add a header at the top:
 
@@ -3480,11 +3487,11 @@ Add a header at the top:
 > for how the system actually runs.
 ```
 
-- [ ] **Step 6: Verify the documented commands actually work**
+- [x] **Step 6: Verify the documented commands actually work**
 
 Run every command block in the new README's "How This Runs" and "Backups" sections, except the restore block, which is explicitly untested. Fix any that do not behave as documented.
 
-- [ ] **Step 7: Final full check**
+- [x] **Step 7: Final full check**
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -3494,7 +3501,7 @@ grep -rn "create_embedding(" src/ --include='*.py' | grep -v "create_validated_e
 ```
 Expected: tests green, status healthy, API healthy, no unvalidated embedding call sites.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add README.md .env.example requirements.txt SPEC.md src/main.py
