@@ -1,0 +1,11 @@
+[Unit]
+Description=Open Brain database backup
+# No After=postgresql.service: a user manager cannot order against a system
+# manager unit, so that line is inert (the existing api unit has it and it
+# does nothing). Readiness is handled by retry inside the command.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/mihai/tools/open-brain
+Environment=PYTHONPATH=/home/mihai/tools/open-brain
+ExecStart=/home/mihai/tools/open-brain/.venv/bin/openbrain backup

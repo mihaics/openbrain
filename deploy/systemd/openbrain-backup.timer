@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly Open Brain database backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+# Persistent: this laptop sleeps through 02:30 regularly. Without it those
+# nights are skipped silently rather than caught up on wake. Note it catches
+# up once on resume - it does not replay every missed occurrence.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
