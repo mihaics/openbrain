@@ -109,6 +109,18 @@ def main():
                                      'rows would otherwise wedge every sweep, '
                                      'since selection is oldest-first.')
 
+    backup_parser = subparsers.add_parser(
+        'backup', help='Dump the database, verify it, and prune old dumps'
+    )
+    backup_parser.add_argument('--verify-only', action='store_true',
+                               help='Re-verify the newest dump; write nothing')
+    backup_parser.add_argument('--status', action='store_true',
+                               help='Report backup state; mutate nothing')
+    backup_parser.add_argument('--dry-run', action='store_true',
+                               help='Print planned actions without executing')
+    backup_parser.add_argument('--json', action='store_true',
+                               help='Machine-readable output (--status only)')
+
     args = parser.parse_args()
     
     if not args.command:
@@ -140,6 +152,9 @@ def main():
         elif args.command == 'reembed':
             from .reembed import reembed_cmd
             return reembed_cmd(args)
+        elif args.command == 'backup':
+            from .backup import backup_cmd
+            return backup_cmd(args)
         else:
             parser.print_help()
             return 1

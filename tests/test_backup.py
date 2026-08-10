@@ -217,3 +217,69 @@ class TestDumpInvocation:
         for key in ("dump_finished", "embedding_dim", "extensions",
                     "server_version", "pg_dump_version"):
             assert manifest[key], f"{key} missing from .unverified manifest"
+
+
+class TestCliModes:
+    def _args(self, **kw):
+        args = Mock()
+        args.verify_only = kw.get('verify_only', False)
+        args.status = kw.get('status', False)
+        args.dry_run = kw.get('dry_run', False)
+        args.json = kw.get('json', False)
+        return args
+
+    def test_rejects_status_with_dry_run(self):
+        from src.cli.backup import backup_cmd
+        assert backup_cmd(self._args(status=True, dry_run=True)) == 2
+
+    def test_rejects_status_with_verify_only(self):
+        from src.cli.backup import backup_cmd
+        assert backup_cmd(self._args(status=True, verify_only=True)) == 2
+
+    def test_rejects_json_without_status(self):
+        from src.cli.backup import backup_cmd
+        assert backup_cmd(self._args(json=True)) == 2
+
+
+class TestStatus:
+    def test_reports_no_backups(self, tmp_path):
+        from src.cli import backup
+
+        report = backup.status_report(tmp_path)
+
+        assert report["dump_count"] == 0
+        assert report["newest_verified_age_seconds"] is None
+        assert report["healthy"] is False
+
+    def test_reports_fresh_backup(self, tmp_path):
+        from src.cli import backup, backup_store
+        from datetime import datetime, timezone
+
+        when = datetime.now(timezone.utc)
+        dump = backup_store.dump_path(tmp_path, 1, when)
+        dump.write_bytes(b"payload")
+        backup_store.write_manifest(backup_store.manifest_path(dump), {
+            "sequence": 1,
+            "dump_size": dump.stat().st_size,
+            "dump_sha256": backup_store.sha256_of(dump),
+            "row_count": 209,
+            "verification": {"archive_written": when.isoformat(),
+                             "payload_decoded": when.isoformat()},
+        })
+
+        report = backup.status_report(tmp_path)
+
+        assert report["dump_count"] == 1
+        assert report["newest_verified_age_seconds"] < 60
+        assert report["healthy"] is True
+
+
+class TestLock:
+    def test_second_invocation_fails_fast(self, tmp_path):
+        from src.cli import backup
+
+        with patch('src.cli.backup.store.BACKUP_DIR', tmp_path):
+            with backup.acquire_lock(tmp_path):
+                with pytest.raises(RuntimeError, match="another backup"):
+                    with backup.acquire_lock(tmp_path):
+                        pass

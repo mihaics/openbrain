@@ -337,3 +337,161 @@ def take_dump(backup_dir: Path, seq: int) -> Tuple[Path, Dict[str, Any]]:
     store.write_manifest(store.manifest_path(final), manifest)
     store.fsync_dir(backup_dir)
     return final, manifest
+
+
+@contextmanager
+def acquire_lock(backup_dir: Path):
+    """Serialize runs. A manual invocation can race the timer."""
+    store.ensure_dir(backup_dir)
+    lock_path = backup_dir / ".lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another backup is running")
+        yield
+    finally:
+        os.close(fd)
+
+
+def status_report(backup_dir: Path) -> Dict[str, Any]:
+    """Machine-readable state. Sub-project 3's health signal consumes this."""
+    dumps = store.managed_dumps(backup_dir)
+    verified = [p for p in dumps if store.is_eligible(p)]
+
+    newest_age = None
+    newest_rows = None
+    if verified:
+        verified.sort(key=lambda p: store.parse_dump_name(p)[0], reverse=True)
+        newest = verified[0]
+        manifest = store.read_manifest(newest) or {}
+        decoded = manifest.get("verification", {}).get("payload_decoded")
+        if decoded:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(decoded)
+            newest_age = age.total_seconds()
+        newest_rows = manifest.get("row_count")
+
+    # Newest archive age, verified or not: sub-project 3 needs to distinguish
+    # "no backup ran" from "a backup ran and failed verification".
+    newest_archive_age = None
+    all_archives = dumps + list(backup_dir.glob("*.unverified"))
+    if all_archives:
+        newest_mtime = max(p.stat().st_mtime for p in all_archives)
+        newest_archive_age = (
+            datetime.now(timezone.utc).timestamp() - newest_mtime
+        )
+
+    last_failure = None
+    failures = sorted(
+        backup_dir.glob("*.unverified"), key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if failures:
+        fm = store.read_manifest(failures[0]) or {}
+        v = fm.get("verification", {})
+        last_failure = {
+            "archive": failures[0].name,
+            "at": v.get("payload_decode_failed"),
+            "reason": v.get("failure_reason"),
+        }
+
+    return {
+        "backup_dir": str(backup_dir),
+        "dump_count": len(dumps),
+        "verified_count": len(verified),
+        "newest_archive_age_seconds": newest_archive_age,
+        "newest_verified_age_seconds": newest_age,
+        "newest_row_count": newest_rows,
+        "last_failure": last_failure,
+        "total_bytes": sum(p.stat().st_size for p in dumps if p.exists()),
+        "healthy": newest_age is not None and newest_age < STALE_AFTER_SECONDS,
+    }
+
+
+def _render_status(report: Dict[str, Any]) -> str:
+    age = report["newest_verified_age_seconds"]
+    age_text = "never" if age is None else f"{age / 3600:.1f}h ago"
+    return "\n".join([
+        f"backup dir:       {report['backup_dir']}",
+        f"dumps:            {report['dump_count']} ({report['verified_count']} verified)",
+        f"newest verified:  {age_text}",
+        f"last failure:     {report['last_failure'] or 'none'}",
+        f"rows in newest:   {report['newest_row_count']}",
+        f"total size:       {report['total_bytes'] / 1e6:.1f} MB",
+        f"healthy:          {report['healthy']}",
+    ])
+
+
+def backup_cmd(args: Namespace) -> int:
+    """Handle the backup command."""
+    primary = [bool(getattr(args, 'verify_only', False)),
+               bool(getattr(args, 'status', False))]
+    if sum(primary) > 1:
+        print("Error: --verify-only and --status are mutually exclusive",
+              file=sys.stderr)
+        return 2
+    if getattr(args, 'json', False) and not getattr(args, 'status', False):
+        print("Error: --json is only valid with --status", file=sys.stderr)
+        return 2
+    if getattr(args, 'dry_run', False) and (
+        getattr(args, 'status', False) or getattr(args, 'verify_only', False)
+    ):
+        print("Error: --dry-run is only valid for a normal backup run",
+              file=sys.stderr)
+        return 2
+
+    backup_dir = store.BACKUP_DIR
+
+    if getattr(args, 'status', False):
+        report = status_report(backup_dir)
+        print(jsonlib.dumps(report, indent=2) if args.json
+              else _render_status(report))
+        return 0 if report["healthy"] else 1
+
+    try:
+        with acquire_lock(backup_dir):
+            if getattr(args, 'verify_only', False):
+                verified = [p for p in store.managed_dumps(backup_dir)]
+                if not verified:
+                    print("Error: no dumps to verify", file=sys.stderr)
+                    return 1
+                verified.sort(key=lambda p: store.parse_dump_name(p)[0],
+                              reverse=True)
+                verify_archive(verified[0])
+                print(f"verified {verified[0].name}")
+                return 0
+
+            if getattr(args, 'dry_run', False):
+                # Must not call next_sequence(): it persists the incremented
+                # value, so a dry run would consume a sequence number and the
+                # first real dump would start at 2.
+                seq = store.peek_sequence(backup_dir)
+                when = datetime.now(timezone.utc)
+                planned = store.dump_path(backup_dir, seq, when)
+                print(f"would write {planned.name}")
+                # Predict pruning as it will happen *after* the new dump
+                # exists, so the preview matches the real run.
+                for p in store.select_for_deletion(
+                    backup_dir, store.KEEP_COUNT - 1, current=None
+                ):
+                    print(f"would prune {p.name}")
+                return 0
+
+            seq = store.next_sequence(backup_dir)
+            dump, manifest = take_dump(backup_dir, seq)
+            print(f"wrote {dump.name} ({manifest['row_count']} rows, "
+                  f"{manifest['dump_size'] / 1e6:.1f} MB)")
+
+            # Prune only after a written and verified dump. A failed run
+            # must never delete a good older one.
+            for p in store.select_for_deletion(backup_dir, store.KEEP_COUNT,
+                                               current=dump):
+                store.delete_dump(p)
+                print(f"pruned {p.name}")
+            store.fsync_dir(backup_dir)
+            return 0
+
+    except (RuntimeError, VerificationError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
