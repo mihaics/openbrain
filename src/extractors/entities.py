@@ -11,28 +11,31 @@ from nltk.chunk import ne_chunk
 from nltk.tree import Tree
 
 
-# Download required NLTK data
+_NLTK_DATA = [
+    ('tokenizers/punkt', 'punkt'),
+    ('taggers/averaged_perceptron_tagger', 'averaged_perceptron_tagger'),
+    ('chunkers/maxent_ne_chunker', 'maxent_ne_chunker'),
+    ('corpora/words', 'words'),
+]
+
+
 def _ensure_nltk_data():
-    """Ensure required NLTK data is downloaded."""
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt', quiet=True)
-    
-    try:
-        nltk.data.find('taggers/averaged_perceptron_tagger')
-    except LookupError:
-        nltk.download('averaged_perceptron_tagger', quiet=True)
-    
-    try:
-        nltk.data.find('chunkers/maxent_ne_chunker')
-    except LookupError:
-        nltk.download('maxent_ne_chunker', quiet=True)
-    
-    try:
-        nltk.data.find('corpora/words')
-    except LookupError:
-        nltk.download('words', quiet=True)
+    """Download the corpora NER needs, tolerating failure.
+
+    This runs at import time, and importing this module must never fail: a
+    missing corpus only costs the NLTK half of extraction (the call site
+    already degrades to pattern-based entities), while a raised exception
+    takes down the MCP server, the API, and every connector with it. An
+    offline machine hits exactly that path.
+    """
+    for resource, package in _NLTK_DATA:
+        try:
+            nltk.data.find(resource)
+        except LookupError:
+            try:
+                nltk.download(package, quiet=True)
+            except Exception:
+                pass
 
 
 _ensure_nltk_data()
