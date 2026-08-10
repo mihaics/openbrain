@@ -2,6 +2,7 @@
 SQL queries for Open Brain memory operations.
 """
 import json
+import sys
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -204,7 +205,8 @@ def _blend_params(cfg) -> list:
 
 MEMORY_COLUMNS = """m.id, m.source, m.source_id, m.content, m.raw_content,
                    m.entities, m.tags, m.tag_sources, m.importance, m.created_at,
-                   m.original_date, m.language, m.metadata"""
+                   m.original_date, m.language, m.metadata,
+                   m.access_count, m.last_accessed_at"""
 
 
 def search_memories(
@@ -426,13 +428,51 @@ def _explain_components(row: Any, cfg, branch: str) -> Dict[str, Any]:
     }
 
 
+def record_access(memory_ids) -> None:
+    """Count an explicit fetch of these memories. Never raises.
+
+    Called only for a fetch-by-id, never for search: appearing in a result
+    list is not evidence a memory was useful, and counting it would let search
+    reinforce whatever it already surfaced. It also keeps memory_search
+    genuinely read-only, which matters because MCP hosts auto-approve on that
+    annotation.
+
+    Runs after the read transaction has committed, in its own transaction. A
+    failure is logged and swallowed: the counter is an optimisation, the read
+    is the product.
+    """
+    ids = [str(m) for m in (memory_ids or [])]
+    if not ids:
+        return
+    if not RankingConfig.get_instance().access_tracking_enabled:
+        return
+
+    try:
+        with get_db_cursor() as cursor:
+            # The ::uuid[] cast is required - a Python list of str adapts as
+            # text[] and raises "operator does not exist: uuid = text". Since
+            # this function swallows exceptions, omitting it would disable
+            # tracking silently and permanently.
+            cursor.execute(
+                """
+                UPDATE memory
+                   SET access_count = access_count + 1, last_accessed_at = NOW()
+                 WHERE id = ANY(%s::uuid[])
+                """,
+                (ids,),
+            )
+    except Exception as e:
+        print(f"Warning: could not record access: {e}", file=sys.stderr)
+
+
 def get_memory_by_id(memory_id: uuid.UUID) -> Optional[Dict[str, Any]]:
     """Get a single memory by ID."""
     with get_db_cursor() as cursor:
         cursor.execute("""
             SELECT id, source, source_id, content, raw_content,
                    entities, tags, tag_sources, importance, created_at,
-                   original_date, language, metadata
+                   original_date, language, metadata,
+                   access_count, last_accessed_at
             FROM memory
             WHERE id = %s
         """, (str(memory_id),))
@@ -645,7 +685,8 @@ def get_memories_by_entity(
         cursor.execute("""
             SELECT id, source, source_id, content, raw_content,
                    entities, tags, tag_sources, importance, created_at,
-                   original_date, language, metadata
+                   original_date, language, metadata,
+                   access_count, last_accessed_at
             FROM memory
             WHERE entities->%s ? %s
             ORDER BY importance DESC, created_at DESC
@@ -662,7 +703,8 @@ def get_today_memories(limit: int = 10) -> List[Dict[str, Any]]:
         cursor.execute("""
             SELECT id, source, source_id, content, raw_content,
                    entities, tags, tag_sources, importance, created_at,
-                   original_date, language, metadata
+                   original_date, language, metadata,
+                   access_count, last_accessed_at
             FROM memory
             WHERE created_at >= CURRENT_DATE
             ORDER BY importance DESC, created_at DESC

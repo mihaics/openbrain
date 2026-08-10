@@ -31,6 +31,7 @@ from db.queries import (
     get_memory_stats,
     update_memory,
     update_memory_tags,
+    record_access,
     merge_tags_for_content_update,
     delete_memory,
     bulk_delete_memories,
@@ -314,9 +315,8 @@ def _serialize_memories(
     ]
 
 
-@app.list_tools()
-async def list_tools() -> List[Tool]:
-    return [
+
+TOOLS: List[Tool] = [
         Tool(
             name="memory_search",
             description=(
@@ -364,7 +364,9 @@ async def list_tools() -> List[Tool]:
         Tool(
             name="memory_get",
             description=f"Fetch a single memory by ID. Returns a memory record {MEMORY_RECORD_SHAPE} or null.",
-            annotations=_read_only(),
+            # Increments an access counter that feeds ranking, so it is neither
+            # read-only nor idempotent. memory_search keeps _read_only().
+            annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -644,6 +646,11 @@ async def list_tools() -> List[Tool]:
     ]
 
 
+@app.list_tools()
+async def list_tools() -> List[Tool]:
+    return TOOLS
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> List[TextContent]:
     if not _DB_READY:
@@ -799,6 +806,10 @@ async def handle_memory_store(args: Dict) -> List[TextContent]:
 async def handle_memory_get(args: Dict) -> List[TextContent]:
     memory_id = uuid.UUID(args["memory_id"])
     mem = await asyncio.to_thread(get_memory_by_id, memory_id)
+    if mem is not None:
+        # After the read, in its own transaction, and never allowed to fail
+        # the fetch it is describing.
+        await asyncio.to_thread(record_access, [memory_id])
     return _json(_serialize_memory(mem, **_content_opts(args)))
 
 

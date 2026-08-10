@@ -123,6 +123,12 @@ def main():
     backup_parser.add_argument('--json', action='store_true',
                                help='Machine-readable output (--status only)')
 
+    get_parser = subparsers.add_parser(
+        'get', help='Fetch one memory by id (counts as an access)'
+    )
+    get_parser.add_argument('memory_id', help='Memory UUID')
+    get_parser.add_argument('--json', action='store_true', help='Output as JSON')
+
     subparsers.add_parser(
         'migrate', help='Apply additive schema changes (idempotent)'
     )
@@ -167,6 +173,9 @@ def main():
         elif args.command == 'backup':
             from .backup import backup_cmd
             return backup_cmd(args)
+        elif args.command == 'get':
+            from .get import get_memory_cmd
+            return get_memory_cmd(args)
         elif args.command == 'migrate':
             from .migrate import migrate_cmd
             return migrate_cmd(args)
