@@ -154,3 +154,186 @@ def verify_archive(archive: Path) -> None:
         )
 
     _pg_restore_decode(archive)
+
+
+def pg_env(config: DatabaseConfig) -> Dict[str, str]:
+    """Child environment carrying the password.
+
+    Never argv: command lines are world-readable via /proc. Never a mutation
+    of os.environ either - this process may go on to do other things.
+    """
+    env = dict(os.environ)
+    env["PGPASSWORD"] = config.password
+    return env
+
+
+def get_db_connection(config: DatabaseConfig):
+    """Connect, retrying briefly.
+
+    A user timer with Persistent=true treats a missed event as handled once
+    the service is queued, not once it succeeds. So a run firing right after
+    resume, before PostgreSQL is accepting connections, gets no second chance
+    until tomorrow unless it retries here.
+    """
+    delay = 2.0
+    last: Optional[Exception] = None
+    for attempt in range(READINESS_ATTEMPTS):
+        try:
+            # connect_timeout bounds each attempt. Without it a single
+            # attempt can hang far past the intended total.
+            return psycopg2.connect(
+                host=config.host, port=config.port, dbname=config.name,
+                user=config.user, password=config.password,
+                connect_timeout=CONNECT_TIMEOUT_SECONDS,
+            )
+        except psycopg2.OperationalError as e:
+            last = e
+            if attempt < READINESS_ATTEMPTS - 1:
+                print(f"database not ready, retrying in {delay:.0f}s",
+                      file=sys.stderr)
+                time.sleep(delay)
+                delay *= 2
+    raise RuntimeError(f"database unreachable after {READINESS_ATTEMPTS} attempts: {last}")
+
+
+def snapshot_metadata(conn) -> Dict[str, Any]:
+    """Export a snapshot and read the counts it will contain.
+
+    The row count must come from the same snapshot pg_dump reads, or it
+    describes a different database state than the archive. Nothing compares
+    it automatically now that restore verification is gone - it exists so
+    the runbook's manual check ("this archive should contain exactly N
+    rows") is exact rather than approximate.
+
+    The caller must keep this transaction open until pg_dump exits.
+    """
+    cur = conn.cursor()
+    cur.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+    cur.execute("SELECT pg_export_snapshot()")
+    snapshot_id = cur.fetchone()[0]
+
+    cur.execute("SELECT count(*) FROM memory")
+    row_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT atttypmod FROM pg_attribute
+        WHERE attrelid = 'memory'::regclass
+          AND attname = 'embedding' AND NOT attisdropped
+    """)
+    row = cur.fetchone()
+    embedding_dim = int(row[0]) if row and row[0] and row[0] > 0 else None
+
+    cur.execute("SELECT extname, extversion, extnamespace::regnamespace::text "
+                "FROM pg_extension ORDER BY extname")
+    extensions = [
+        {"name": r[0], "version": r[1], "schema": r[2]} for r in cur.fetchall()
+    ]
+
+    cur.execute("SHOW server_version")
+    server_version = cur.fetchone()[0]
+
+    return {
+        "snapshot_id": snapshot_id,
+        "row_count": row_count,
+        "embedding_dim": embedding_dim,
+        "extensions": extensions,
+        "server_version": server_version,
+    }
+
+
+def _pg_dump_version() -> str:
+    out = subprocess.run(["pg_dump", "--version"], capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def take_dump(backup_dir: Path, seq: int) -> Tuple[Path, Dict[str, Any]]:
+    """Produce a verified dump plus its manifest data."""
+    config = DatabaseConfig.get_instance()
+    store.ensure_dir(backup_dir)
+
+    started = datetime.now(timezone.utc)
+    final = store.dump_path(backup_dir, seq, started)
+    partial = backup_dir / f"{final.name}.partial.{os.getpid()}"
+
+    conn = get_db_connection(config)
+    try:
+        meta = snapshot_metadata(conn)
+
+        argv = [
+            "pg_dump", "-Fc",
+            "-h", config.host, "-p", str(config.port),
+            "-U", config.user, "-d", config.name,
+            "--snapshot", meta["snapshot_id"],
+            "-f", str(partial),
+        ]
+        result = subprocess.run(argv, env=pg_env(config), capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"pg_dump failed ({result.returncode}): "
+                f"{result.stderr.decode(errors='replace')}"
+            )
+    finally:
+        # Only now is the snapshot no longer needed.
+        conn.close()
+
+    os.chmod(partial, 0o600)
+
+    try:
+        verify_archive(partial)
+    except VerificationError as e:
+        # Keep the evidence. An orphaned .partial with no manifest loses the
+        # diagnostic entirely, and an unverified archive must never be able to
+        # pass as a good backup.
+        failed_at = datetime.now(timezone.utc)
+        unverified = backup_dir / f"{final.name}.unverified"
+        store.publish(partial, unverified)
+        # Carry the same metadata a successful manifest gets. It was all
+        # collected before verification failed, and a manual recovery from a
+        # partially-bad archive needs the dimension and extension versions
+        # every bit as much as a clean one does.
+        store.write_manifest(store.manifest_path(unverified), {
+            "sequence": seq,
+            "dump_started": started.isoformat(),
+            "dump_finished": failed_at.isoformat(),
+            "snapshot_id": meta["snapshot_id"],
+            "row_count": meta["row_count"],
+            "embedding_dim": meta["embedding_dim"],
+            "extensions": meta["extensions"],
+            "server_version": meta["server_version"],
+            "pg_dump_version": _pg_dump_version(),
+            "dump_size": unverified.stat().st_size,
+            "dump_sha256": store.sha256_of(unverified),
+            "verification": {
+                "archive_written": failed_at.isoformat(),
+                "payload_decoded": None,
+                "payload_decode_failed": failed_at.isoformat(),
+                "failure_reason": str(e),
+            },
+        })
+        store.fsync_dir(backup_dir)
+        raise
+
+    finished = datetime.now(timezone.utc)
+    manifest = {
+        "sequence": seq,
+        "dump_started": started.isoformat(),
+        "dump_finished": finished.isoformat(),
+        "snapshot_id": meta["snapshot_id"],
+        "row_count": meta["row_count"],
+        "embedding_dim": meta["embedding_dim"],
+        "extensions": meta["extensions"],
+        "server_version": meta["server_version"],
+        "pg_dump_version": _pg_dump_version(),
+        "dump_size": partial.stat().st_size,
+        "dump_sha256": store.sha256_of(partial),
+        "verification": {
+            "archive_written": finished.isoformat(),
+            "payload_decoded": finished.isoformat(),
+            "payload_decode_failed": None,
+        },
+    }
+
+    store.publish(partial, final)
+    store.write_manifest(store.manifest_path(final), manifest)
+    store.fsync_dir(backup_dir)
+    return final, manifest
