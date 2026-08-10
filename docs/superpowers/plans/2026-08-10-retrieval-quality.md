@@ -1,4 +1,4 @@
-# OpenBrain Retrieval Quality — Implementation Plan (revision 6)
+# OpenBrain Retrieval Quality — Implementation Plan (revision 7)
 
 **Source spec:** `docs/superpowers/specs/2026-08-10-retrieval-quality-design.md`
 (**revision 9**, passed adversarial review). The spec owns every design
@@ -392,6 +392,11 @@ The only destructive task. Everything in spec §3.2 is load-bearing.
       the undo CAS against live PostgreSQL — including a CAS conflict and an
       undo round-trip. Without this the destructive production run in 9-OPS
       would be the first time any of that machinery touches a real database.
+      It also **asserts the consumer wiring**, which Task 1.3b could not:
+      after the run, the lock, `.retag-sequence` and undo file exist **under
+      the temporary root**, and the production root is byte-for-byte
+      unchanged. Setting the environment variable proves only that the
+      variable was set.
 - [ ] **9.6** Full suite. Commit the implementation — `feat(cli): add retag
       backfill with undo` — **before** any live run.
 
@@ -464,7 +469,11 @@ committing the code that performs it.
       able to rewrite the corpus. Destructive examples also run with
       `OPENBRAIN_BACKUP_DIR` pointed at a temporary directory, for the same
       reason as Task 9.5 — otherwise a documentation check writes into the
-      production retag namespace.
+      production retag namespace. That directory must **first** be given a
+      fresh, verified, identity-bearing backup
+      (`DB_NAME=openbrain_test OPENBRAIN_BACKUP_DIR=<tmp> openbrain backup`).
+      An empty directory makes forward `retag` fail its backup gate, so the
+      documented example could never run at all.
 - [ ] **11.4** Commit: `docs: describe retrieval behaviour and new commands`
 
 ---
