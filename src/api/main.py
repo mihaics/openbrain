@@ -40,6 +40,7 @@ from db.queries import (
     get_entity_graph
 )
 from embedder import EmbeddingError, create_validated_embedding
+from config.ranking import RankingConfig
 from extractors.entities import extract_entities
 from extractors.tagger import get_tagger, auto_tag
 from analytics.trends import TrendAnalyzer
@@ -82,6 +83,7 @@ def require_schema() -> None:
 async def lifespan(app: FastAPI):
     """Lifespan context manager."""
     # Startup
+    RankingConfig.get_instance()
     try:
         init_db()
         validate_schema()

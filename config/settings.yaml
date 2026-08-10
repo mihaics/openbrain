@@ -33,6 +33,23 @@ tags:
   default_tags:
     - auto
 
+ranking:
+  # Secondary signals break near-ties; they must not override relevance.
+  # w_rec + w_imp + w_acc is capped at 0.10 and validated at startup.
+  w_rec: 0.05
+  w_imp: 0.03
+  w_acc: 0.02
+  half_life_days: 180
+  access_cap: 10
+  access_tracking:
+    enabled: true
+  rerank:
+    enabled: false
+    url: ""
+    model: ""
+    top_n: 50
+    timeout_seconds: 5
+
 analytics:
   trend_weeks: 4
   weekly_report_day: 6

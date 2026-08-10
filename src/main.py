@@ -42,6 +42,7 @@ from db.queries import (
     get_trending_tags,
 )
 from embedder import EmbedderConfig, EmbeddingError, create_validated_embedding
+from config.ranking import RankingConfig
 from extractors.entities import extract_entities
 from extractors.tagger import auto_tag
 from analytics.trends import TrendAnalyzer
@@ -128,6 +129,10 @@ _DB_READY = False
 
 def init_server() -> None:
     global _DB_READY
+    # Load and validate ranking config up front. Deferring it to the first
+    # search would surface a bad weight as mysteriously reordered results
+    # instead of a startup failure naming the key.
+    RankingConfig.get_instance()
     try:
         connection.init_db()
         _DB_READY = True

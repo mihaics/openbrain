@@ -132,6 +132,12 @@ def main():
         return 1
     
     try:
+        # Validate ranking config before dispatch, except for migrate which
+        # must run even on a broken system.
+        if args.command != 'migrate':
+            from ..config.ranking import RankingConfig
+            RankingConfig.get_instance()
+
         if args.command == 'search':
             from .search import search_memories_cmd
             return search_memories_cmd(args)
