@@ -12,9 +12,9 @@ OpenBrain stores memories in PostgreSQL with pgvector embeddings, tags, extracte
 
 | Layer | Technology |
 | --- | --- |
-| Database | PostgreSQL 16 + pgvector |
+| Database | PostgreSQL 18 + pgvector, port 5433 |
 | API | FastAPI |
-| MCP | Python MCP server over stdio |
+| MCP | Python MCP server over stdio (low-level `mcp.server.Server`) |
 | Web | Next.js 16, React 19, Base UI, Cytoscape |
 | CLI | Python argparse entrypoint |
 | Embeddings | Ollama, OpenAI, OpenRouter, or custom OpenAI-compatible API |
@@ -24,7 +24,7 @@ OpenBrain stores memories in PostgreSQL with pgvector embeddings, tags, extracte
 ```text
 .
 ├── config/settings.yaml        # Local default configuration
-├── docker-compose.yml          # postgres + api + web
+├── deploy/systemd/             # Tracked unit files, installed by symlink
 ├── src/
 │   ├── main.py                 # MCP stdio server
 │   ├── api/main.py             # FastAPI app
@@ -34,48 +34,84 @@ OpenBrain stores memories in PostgreSQL with pgvector embeddings, tags, extracte
 │   ├── extractors/             # entities + auto-tagging
 │   ├── analytics/              # trends and weekly report generation
 │   └── connectors/             # importers for external sources
-├── tests/test_core.py
+├── tests/                      # pytest suite
 └── web/                        # Next.js app
 ```
 
 Use `web/` for the UI.
 
-## Quick Start
+## How This Runs
 
-1. Create local environment config:
+Two systemd --user services, plus the system PostgreSQL cluster:
 
-```bash
-cp .env.example .env
-```
-
-2. Edit `.env`.
-
-For local Ollama:
-
-```env
-EMBEDDER_PROVIDER=ollama
-EMBEDDER_MODEL=qwen3-embedding:0.6b
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-```
-
-For OpenAI/OpenRouter, set the provider/model and API key instead.
-
-3. Start the stack:
-
-```bash
-docker compose up -d
-```
-
-4. Open services:
-
-| Service | URL |
+| Component | Detail |
 | --- | --- |
-| Web UI | `http://localhost:3777` |
-| API | `http://localhost:8000` |
-| API docs | `http://localhost:8000/docs` |
-| Postgres host port | `localhost:5433` |
+| API | `openbrain-api.service` → uvicorn on 127.0.0.1:8000 |
+| Web | `openbrain-web.service` → Next.js on :3777 |
+| Database | System PostgreSQL 18, port **5433**, database/user `openbrain` |
+| Embeddings | Ollama `qwen3-embedding:0.6b`, 1024 dimensions |
+| Backups | `openbrain-backup.timer`, nightly 02:30, to `~/backups/openbrain/` |
 
-Docker Compose does not expose MCP as an HTTP service. Run the MCP server as a stdio process from your MCP client.
+```bash
+systemctl --user status openbrain-api openbrain-web openbrain-backup.timer
+systemctl --user restart openbrain-api
+journalctl --user -u openbrain-backup.service -n 50
+```
+
+Unit files are tracked in `deploy/systemd/` and installed by symlink into
+`~/.config/systemd/user/`.
+
+MCP is not exposed over HTTP. Run the MCP server as a stdio process from your
+MCP client.
+
+## MCP Registration
+
+The MCP server is registered in six agent configurations:
+
+`~/.claude/.claude.json`, `~/.claude-quarticle/.claude.json`,
+`~/.codex/config.toml`, `~/.gemini/settings.json`,
+`~/.config/opencode/opencode.json`, `~/.config/harness/mcp.json`
+
+## Backups
+
+```bash
+openbrain backup            # dump, verify, prune (what the timer runs)
+openbrain backup --status   # age of newest verified dump; exit 1 if stale
+openbrain backup --status --json
+openbrain backup --verify-only
+```
+
+Dumps are `pg_dump -Fc` archives in `~/backups/openbrain/`, named
+`openbrain-<seq>-<utc>.dump` with a sidecar `.json` manifest recording the
+row count, embedding dimension, extension versions, size, and SHA-256.
+Retention keeps the newest 60.
+
+**What verification does and does not prove.** Every dump's TOC is checked
+against the expected object set and its entire payload is decoded, which
+catches truncation, bit-rot, and a broken `pg_dump`. It does **not** prove
+the archive restores: nothing exercises `CREATE EXTENSION`, schema
+creation, index rebuilds, or the `vector(1024)` column. Restore
+verification was deliberately left out to avoid a superuser step.
+
+### Restoring — untested procedure
+
+> These commands have never been run on this machine. Restoring requires
+> creating a database and the `uuid-ossp` and `vector` extensions, which
+> needs superuser. Expect to debug this the first time.
+
+```bash
+sudo -u postgres createdb -O openbrain openbrain_restored
+sudo -u postgres psql -d openbrain_restored -c 'CREATE EXTENSION "uuid-ossp"'
+sudo -u postgres psql -d openbrain_restored -c 'CREATE EXTENSION vector'
+PGPASSWORD=... pg_restore -h localhost -p 5433 -U openbrain \
+  -d openbrain_restored --no-owner --no-privileges \
+  ~/backups/openbrain/openbrain-<seq>-<utc>.dump
+```
+
+Check the restored row count against the manifest's `row_count`.
+
+For embedding-level damage specifically, `openbrain reembed` repairs rows
+in place and needs no restore at all.
 
 ## Local Development
 
@@ -217,6 +253,8 @@ openbrain import claude_code ~/.claude/sessions --limit 100
 openbrain serve --reload
 openbrain exec "ls -la"
 openbrain exec --sandbox --timeout 120 "python -V"
+openbrain reembed --dry-run
+openbrain backup --status
 ```
 
 ## Configuration
@@ -257,16 +295,12 @@ Indexes include pgvector HNSW for embeddings, GIN for tags/entities, and full-te
 .venv/bin/python -m pytest -q
 ```
 
-Current expected result:
-
-```text
-43 passed
-```
+Tests marked `integration` need the live cluster and are deselected by
+default; run them with `-m integration`.
 
 Useful checks:
 
 ```bash
-docker compose config
 git diff --check
 ```
 

@@ -1,5 +1,11 @@
 # Open Brain - Architecture Specification
 
+> **Historical.** This describes the original design, not the current
+> system. It is wrong about: ivfflat (the schema uses HNSW), port 5432 (it
+> is 5433), FastMCP (the server uses the low-level `mcp.Server` API), and a
+> `get_today_memories` SQL function used by the query layer. See `README.md`
+> for how the system actually runs.
+
 ## Project Overview
 
 - **Name**: Open Brain

@@ -1,6 +1,7 @@
 """
 Open Brain MCP Server.
-FastMCP-based MCP server for memory operations.
+MCP stdio server for memory operations, built on the low-level
+`mcp.server.Server` API (@app.list_tools / @app.call_tool), not FastMCP.
 """
 import asyncio
 import json
