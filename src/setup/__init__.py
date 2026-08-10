@@ -199,7 +199,7 @@ def run_setup() -> Dict[str, Any]:
     # Tags config
     config['tags'] = {
         'deny_list': ['password', 'secret', 'api_key', 'token', 'credential'],
-        'default_tags': ['auto'],
+        'default_tags': [],
     }
     
     # ═══════════════════════════════════════════════════════

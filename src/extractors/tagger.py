@@ -23,9 +23,16 @@ class TagConfig:
         
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-        
-        self.deny_list = set(config['tags'].get('deny_list', []))
-        self.default_tags = config['tags'].get('default_tags', ['auto'])
+
+        self._apply(config)
+
+    def _apply(self, config: dict) -> None:
+        tags_cfg = (config or {}).get('tags') or {}
+        self.deny_list = set(tags_cfg.get('deny_list', []))
+        # No 'auto' fallback. It carried no information and sat on 89% of
+        # rows; leaving it as the default here would reintroduce it whenever
+        # the key is absent, which is exactly how it survives a config edit.
+        self.default_tags = tags_cfg.get('default_tags', [])
     
     @classmethod
     def get_instance(cls, config_path: str = None) -> 'TagConfig':

@@ -3,7 +3,7 @@ Entity extraction for Open Brain.
 Uses basic NLP for named entity recognition.
 """
 import re
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import nltk
 from nltk import pos_tag, word_tokenize
@@ -39,6 +39,64 @@ def _ensure_nltk_data():
 
 
 _ensure_nltk_data()
+
+
+
+# Ambiguous technology terms.
+#
+# tech_keywords held bare 'go', 'rest', 'api', 'ui', 'node' and matched them
+# with \bgo\b against lowercased text, so the English verb "go" tagged a
+# memory as the Go language: of 47 memories tagged `go`, only 27 contained
+# the word at all.
+#
+# Two trigger kinds, deliberately distinct:
+#   SUFFICIENT_ALIASES  - present => the technology is meant, bare token not
+#                         required. `go1.24` lives here because \bgo\b does
+#                         not match it at all ('1' is a word character), so
+#                         requiring a bare token would make the rule dead.
+#   QUALIFIED_CONTEXTS  - the bare token AND a context phrase must both appear.
+SUFFICIENT_ALIASES = {
+    "go": (r"\bgolang\b", r"\bgoroutines?\b", r"\bgo\.mod\b", r"\bgofmt\b",
+           r"\bgo1\.\d+"),
+    "nodejs": (r"\bnode\.js\b", r"\bnodejs\b", r"\bnpm\b", r"\bnode_modules\b"),
+    "rest": (r"\brestful\b",),
+    "java": (r"\bjvm\b", r"\bmaven\b", r"\bgradle\b", r"\bmvn\b"),
+}
+
+QUALIFIED_CONTEXTS = {
+    "go": (r"\bgo mod\b", r"\bgo get\b", r"\bgo routine\b"),
+    "rest": (r"\brest api\b", r"\brest endpoint\b"),
+    "api": (r"\bapi key\b", r"\bapi endpoint\b", r"\bgraphql api\b",
+            r"\brest api\b", r"\bapi call\b"),
+    "ui": (r"\bui component\b", r"\bweb ui\b", r"\bui test\b"),
+    "ux": (r"\bux design\b", r"\buser experience\b"),
+    "node": (r"\bnode version\b",),
+    "java": (r"\bjava \d+\b", r"\bspring boot\b"),
+}
+
+# One technology must not enter under two spellings: the keyword layer already
+# canonicalises node -> nodejs, so entity extraction routes through the same map.
+CANONICAL_TECH = {"node": "nodejs"}
+
+AMBIGUOUS_TECH = set(QUALIFIED_CONTEXTS) | set(SUFFICIENT_ALIASES)
+
+
+def _emit_tech(keyword: str, lowered: str) -> Optional[str]:
+    """Decide whether a technology keyword is really meant, and under which name."""
+    canonical = CANONICAL_TECH.get(keyword, keyword)
+
+    for alias in SUFFICIENT_ALIASES.get(canonical, ()):
+        if re.search(alias, lowered):
+            return canonical
+
+    if canonical in QUALIFIED_CONTEXTS or keyword in QUALIFIED_CONTEXTS:
+        contexts = QUALIFIED_CONTEXTS.get(keyword, ()) + QUALIFIED_CONTEXTS.get(canonical, ())
+        has_token = re.search(rf"\b{re.escape(keyword)}\b", lowered)
+        if has_token and any(re.search(c, lowered) for c in contexts):
+            return canonical
+        return None
+
+    return canonical
 
 
 class EntityExtractor:
@@ -135,8 +193,18 @@ class EntityExtractor:
         # still trigger, and 'java' doesn't match inside 'javascript'. The old
         # set(text.split()) approach relied on whitespace-only tokenization.
         lowered = text.lower()
+
+        # Aliases imply their technology without the bare token appearing:
+        # "golang" never contains a standalone "go".
+        for canonical, aliases in SUFFICIENT_ALIASES.items():
+            if any(re.search(a, lowered) for a in aliases):
+                entities['technologies'].add(canonical)
         for kw in self.tech_keywords:
-            if re.search(rf"\b{re.escape(kw)}\b", lowered):
+            if kw in AMBIGUOUS_TECH or kw in CANONICAL_TECH:
+                emitted = _emit_tech(kw, lowered)
+                if emitted:
+                    entities['technologies'].add(emitted)
+            elif re.search(rf"\b{re.escape(kw)}\b", lowered):
                 entities['technologies'].add(kw)
         for kw in self.project_keywords:
             if re.search(rf"\b{re.escape(kw)}\b", lowered):

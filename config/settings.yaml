@@ -30,8 +30,8 @@ tags:
     - api_key
     - token
     - credential
-  default_tags:
-    - auto
+  # Deliberately empty: a tag applied to everything conveys nothing.
+  default_tags: []
 
 ranking:
   # Secondary signals break near-ties; they must not override relevance.
