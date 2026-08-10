@@ -1,4 +1,4 @@
-# OpenBrain Retrieval Quality — Design (revision 3)
+# OpenBrain Retrieval Quality — Design (revision 5)
 
 Scope: sub-project 2 of 4. Sub-project 1 (reliability bundle) shipped
 2026-08-10. Sub-projects 3 (auto-capture) and 4 (transcript-search MCP)
@@ -11,7 +11,13 @@ Revision history. R1 → R2: the weight invariant was arithmetically false, and
 blending ran *after* the caller's LIMIT so it could promote nothing. R2 → R3:
 NULL `created_at` scored as maximally recent, the rerank/LIMIT rule
 contradicted itself, and the "no user tag destroyed" guarantee was still
-false. Each was verified against the live database before being accepted.
+false. R3 → R4: `pool` stopped including `top_n`, reranker result ordering was
+undefined, and review found a *live* tag-loss bug in `handle_memory_update`
+plus a startup barrier both servers would have swallowed. R4 → R5: the
+textless rerank bypass could over-return, the undo format collided with its own
+duplicate-ID rule, an uncaught error cannot serve 503, and review found a second
+live bug — REST `importance_min` filtering after the SQL limit. Each was
+verified against the live database or the source before being accepted.
 
 ## Measured current state (2026-08-10, live cluster)
 
@@ -110,7 +116,7 @@ top of the no-signal branch and of every score tie.
 Uniform definition across branches: each branch produces `rel_raw`, and
 
 ```
-rel_norm = rel_raw / NULLIF(MAX(rel_raw) OVER (), 0)                  -- 0..1
+rel_norm = COALESCE(rel_raw / NULLIF(MAX(rel_raw) OVER (), 0), 0)     -- 0..1
 recency  = CASE WHEN created_at IS NULL THEN 0
                 ELSE exp(-ln(2) * GREATEST(age_days, 0) / half_life) END
 imp      = LEAST(GREATEST(COALESCE(importance, 0.5), 0), 1)
@@ -125,6 +131,12 @@ an undated memory `exp(0) = 1.0` — maximally recent. `acc` is clamped on both
 sides for the same class of reason. The `::double precision` cast is required
 because `LEAST(7,10)/10` evaluates to `0` (verified).
 
+The outer `COALESCE(..., 0)` on `rel_norm` covers a real degenerate case: in
+vector-only search every cosine similarity can be negative and clamp to zero,
+making `MAX(rel_raw) = 0`, every `rel_norm` NULL, every score NULL, and the
+ordering silently fall through to timestamps. Tested with an all-zero
+candidate set.
+
 | Parameter | Default |
 | --- | --- |
 | `w_rec` / `w_imp` / `w_acc` | 0.05 / 0.03 / 0.02 |
@@ -138,7 +150,9 @@ the shipped values. Given that bound, a relevance gap **strictly greater than
 0.10** cannot be overcome. At a gap of exactly 0.10 the best case is a tie,
 resolved by the `created_at DESC NULLS LAST, id` tie-breaker — so the tested
 property is "gap > 0.10 ⇒ no flip; gap < 0.10 ⇒ flip possible", with equality
-called out as a tie rather than glossed.
+called out as a tie rather than glossed. Tests assert the boundary with a
+tolerance rather than at bit-exact 0.10, since the weights are parsed as
+floats and mixed float arithmetic can differ by an ulp.
 
 ### 1.4 Query structure
 
@@ -156,13 +170,39 @@ arm CTEs (each LIMIT pool)
   → LIMIT :candidate_n
 ```
 
-`pool = max(limit*4, 20)`. The union can hold up to `2*pool` rows, so
-"the pool" is defined as **the ordered union**, and `candidate_n` is:
+`pool = max(limit*4, 20, top_n)` when reranking is enabled, else
+`max(limit*4, 20)`. Including `top_n` is not optional: with `limit=1,
+top_n=100` each arm yields at most 20 rows, and `candidate_n` cannot
+manufacture candidates the arms never selected.
 
-| Reranking | `candidate_n` | Who applies the caller's limit |
+`limit` is validated `>= 1` at **every** entry point — MCP clamps today, but
+REST and CLI accept arbitrary integers, and a negative limit reaches SQL as
+`LIMIT -1`, which PostgreSQL rejects. Validation happens before `pool` or
+`candidate_n` is computed.
+
+**All filters must reach SQL.** REST `/memories/search` currently calls
+`search_memories()` without `importance_min` and filters the returned list
+afterwards, so `limit=10, importance_min=0.8` can return fewer than ten rows
+while qualifying rows sit just below the SQL limit. `search_memories` already
+accepts the parameter; REST is fixed to pass it (and `importance_max`) rather
+than post-filtering. Any filter applied after `LIMIT` is a bug by
+construction, because it removes rows the limit already paid for.
+
+The union can hold up to `2*pool` rows, so "the pool" is defined as **the
+ordered union**, and `candidate_n` is:
+
+Define `rerank_applicable = rerank.enabled AND the query has non-empty text`.
+Reranking is bypassed for the vector-only and no-signal branches (§4), so
+keying on `enabled` alone would select a wide `candidate_n` that nothing then
+truncates:
+
+| `rerank_applicable` | `candidate_n` | Who applies the caller's limit |
 | --- | --- | --- |
-| disabled | `limit` | SQL, exactly once |
-| enabled | `max(limit, top_n)` | the application, after reranking |
+| false | `limit` | SQL, exactly once |
+| true | `max(limit, top_n)` | the application, after reranking |
+
+`pool` uses the same predicate, so a bypassed rerank never widens the pool
+either.
 
 This resolves revision 2's contradiction, where SQL applied the final limit
 *and* the reranker was promised the pre-limit pool. Exactly one component
@@ -237,11 +277,16 @@ so revision 2 flipping only the first was incomplete. `memory_search` stays
 genuinely read-only, which matters because hosts auto-approve on that hint.
 
 **Instrumentation boundary, chosen and stated:** the counter is incremented by
-an explicit `record_access(ids)` call in the **MCP `memory_get` handler and
-the CLI**, never inside `get_memory_by_id`. Instrumenting the query function
-would make REST `GET /memories/{id}` state-changing, which violates HTTP
-semantics and would let web-UI prefetch inflate counts. Consequence, stated
-plainly: REST reads do not contribute to the signal.
+an explicit `record_access(ids)` call in the **MCP `memory_get` handler** and
+in a **new `openbrain get ID` CLI command**, never inside `get_memory_by_id`.
+Instrumenting the query function would make REST `GET /memories/{id}`
+state-changing, which violates HTTP semantics and would let web-UI prefetch
+inflate counts. Consequence, stated plainly: REST reads do not contribute.
+
+The CLI command is new because there is currently no fetch-by-id command at
+all — only `search`, `store`, `stats` and friends — so "record access from the
+CLI" previously had no call site. Instrumenting CLI `search` instead would
+violate the no-search-tracking rule.
 
 ```sql
 UPDATE memory SET access_count = access_count + 1, last_accessed_at = NOW()
@@ -259,7 +304,9 @@ commit and update loses one increment — the correct trade.
 
 **Kill switch:** `ranking.access_tracking.enabled` (default `true`). If a host
 reacts badly to the annotation change, setting it `false` restores the
-original annotations and stops the writes without a code change.
+original annotations and stops the writes without a code change. It is read at
+process start, so flipping it requires restarting the MCP server and API —
+annotations and ranking config are both process-cached.
 
 ## Component 3 — Tag hygiene
 
@@ -273,8 +320,12 @@ original annotations and stops the writes without a code change.
 
   | Kind | Rule | Examples |
   | --- | --- | --- |
-  | Sufficient alias | present ⇒ emit tag, bare token not required | `golang`, `goroutine`, `go.mod`, `gofmt`, `nodejs`, `node.js`, `npm`, `node_modules`, `restful`, `jvm`, `maven`, `gradle` |
-  | Qualified context | bare token **and** context phrase both required | `go` + `go1.`; `rest` + `rest api`; `api` + (`api key`\|`api endpoint`\|`graphql api`); `ui` + (`ui component`\|`web ui`\|`ui test`); `ux` + `ux design`; `java` + (`java 8`…`java 25`\|`spring boot`) |
+  | Sufficient alias | present ⇒ emit tag, bare token not required | `golang`, `goroutine`, `go.mod`, `gofmt`, `go1.<digits>`, `nodejs`, `node.js`, `npm`, `node_modules`, `restful`, `jvm`, `maven`, `gradle` |
+  | Qualified context | bare token **and** context phrase both required | `go` + `go mod`; `rest` + `rest api`; `api` + (`api key`\|`api endpoint`\|`graphql api`); `ui` + (`ui component`\|`web ui`\|`ui test`); `ux` + `ux design`; `java` + (`java 8`…`java 25`\|`spring boot`) |
+
+  `go1.<digits>` is a **sufficient alias, not a qualified context**: `\bgo\b`
+  does not match `go1.24` at all, because `1` is a word character (verified),
+  so requiring a bare token alongside it made the rule unreachable.
 
   Revision 2 listed `frontend` as context for `ui`, which would emit `ui` for
   text never containing "ui", and `go build`/`go test` for `go`, which fire on
@@ -319,7 +370,10 @@ Safety, in order:
    directory could gate a retag of database B on a dump of database A. This
    sub-project adds `database: {host, port, name}` to the manifest and the
    gate compares it against the live `DatabaseConfig`. That changes manifest
-   *content*, not the TOC, so the 19-entry allowlist is unaffected.
+   *content*, not the TOC, so the 19-entry allowlist is unaffected. Accepted
+   limitation: host/port/name is routing information, so a recreated database
+   at the same address still matches. It is sufficient for the mistake being
+   guarded — a reused backup directory pointed at a different database.
    **The gate does not apply to `--undo`**, which must work in an emergency.
 3. **Undo file written and fsynced before any mutation.**
    `~/backups/openbrain/tag-backfill-<seq>.jsonl`, `O_CREAT|O_EXCL`, 0600,
@@ -333,17 +387,37 @@ Safety, in order:
    after_tag_sources, content_hash, source, at}`.
 4. **Forward CAS on the full recomputation input:** `id`, `content`, `source`,
    `tags`, `tag_sources` as read. Zero rows affected → skipped and reported.
-5. **Undo is also CAS**, against `after_tags`, `after_tag_sources`, **and
-   `content_hash`/`source`**. Revision 2 guarded only the tag fields, so an
-   edit that changed content while leaving tags identical would have had
-   old-content tags restored onto it. Conflicts are skipped and reported
-   unless `--force`. The whole file is validated and duplicate ids rejected
-   before the first write.
-6. **`--limit` selects rows whose recomputed `tags` *or* `tag_sources`
+5. **Applied-markers, not planned-changes.** The undo file is written before
+   mutating, so it lists *planned* changes. If a forward CAS then skips a row
+   because another writer independently produced the same `after_*` state,
+   a later undo would match that state and clobber the other writer's work.
+   Each row therefore gets a durable **applied marker**: the CAS
+   `UPDATE ... RETURNING` runs inside a transaction, the marker is appended and
+   fsynced before commit, and undo considers only marked rows. A marker whose
+   commit then failed is harmless, because undo's own CAS will not match.
+6. **Undo is also CAS**, against `after_tags`, `after_tag_sources`, **and
+   `source` plus `md5(content)` evaluated in SQL**, not hashed in Python and
+   compared afterwards — that would leave a check-then-write race. `md5()` is
+   core PostgreSQL; `sha256()` would need an extension and therefore a TOC
+   entry. Conflicts are skipped and reported unless `--force`. The undo file has **two record types** —
+   `{"type":"plan",...}` and `{"type":"applied","id":...}` — because a marker
+   necessarily repeats its plan's id and a blanket duplicate-id rule would
+   reject valid files. Validation requires: exactly one `plan` per id, at most
+   one `applied` per id, and every `applied` referencing an existing `plan`.
+   The whole file is validated before the first write.
+   **Accepted residual risk:** this is value-based CAS, so an intervening
+   writer that changes a row and restores exactly the same values (ABA) is
+   undetectable. Adding a row-version column would close it and is deliberately
+   not done, because it is a second schema change for a single-user laptop
+   tool; the window is one manual undo after one manual backfill.
+7. **`--limit` selects rows whose recomputed `tags` *or* `tag_sources`
    differ**, ordered `created_at ASC, id ASC`. Comparing tags alone would
    never select a row whose provenance map is wrong but whose tag list
-   matches, and the run would never converge.
-7. `--undo --dry-run` is valid (report only); `--undo --limit` is a usage
+   matches, and the run would never converge. All CAS comparisons on the
+   nullable `tags` and `tag_sources` columns use `IS NOT DISTINCT FROM`, since
+   plain equality against NULL never matches and would skip legacy rows
+   forever.
+8. `--undo --dry-run` is valid (report only); `--undo --limit` is a usage
    error, since partially undoing a recorded set is how inconsistency starts.
 
 Expected: `auto` removed from 186 rows, `go` from ~20–25. `--dry-run` first.
@@ -364,6 +438,16 @@ standard "OpenAI `/v1/rerank`":
 - **Rejected wholesale** (fall back to SQL order): any index out of range or
   duplicated, any `relevance_score` that is non-numeric, NaN, or infinite, any
   non-object entry, or more results than documents submitted.
+- **Ordering authority is the score, not the array.** Reranked candidates are
+  sorted by `relevance_score DESC, original_sql_index ASC`; response array
+  order is not trusted, since a conforming endpoint may return results
+  unsorted. The `original_sql_index` tie-break keeps it deterministic.
+- **Bypassed entirely when there is no non-empty text query.** The vector-only
+  and no-signal branches have nothing to put in `{query: ...}`, and reranking
+  a filter-only listing against an empty string would reorder it arbitrarily.
+- `top_n` is capped at 200, and the request is capped at 1 MB total with each
+  document truncated to 4 KB, so an oversized corpus cannot produce an
+  unbounded HTTP body.
 - **`top_n < limit` is defined:** rerank the top `top_n` candidates, then
   append the remaining SQL-ordered candidates to fill `limit`. The caller
   always gets `limit` results when that many exist.
@@ -381,20 +465,39 @@ so a user who submits a complete tag list containing an existing `go` tag
 keeps provenance `entity` — and retag would then remove a tag the user had
 explicitly chosen to keep.
 
-Two changes, together:
+There is also a **second, larger hole that has nothing to do with retag**, and
+it is a live data-loss bug today. `handle_memory_update` recomputes the whole
+tag set on a content update:
+
+```python
+tag_map = auto_tag(content, new_entities, effective_source, user_tags or [])
+```
+
+When a caller updates `content` without passing `tags`, `user_tags` is empty,
+so the recomputed map **replaces** the stored tags and every existing
+`user`-provenance tag is destroyed — no retag required. Verified in
+`src/main.py`.
+
+Three changes, together:
 
 1. **Fix the semantics at the source.** `update_memory_tags` stamps
    provenance `user` for every tag the caller explicitly submits. Explicit
    submission *is* user intent; recording it as `entity` was the bug.
-2. **State the residual hole.** Rows edited *before* this fix are
+2. **Preserve on content-only updates.** When `tags` is omitted, the
+   recomputed automatic tags are **merged over** the retained `user` and
+   unknown-provenance tags rather than replacing them. Because this is a
+   read-modify-write, it is done under `SELECT ... FOR UPDATE` in one
+   transaction — otherwise a concurrent explicit tag update can be read,
+   overwritten, and lost between the read and the write.
+3. **State the residual hole.** Rows edited *before* these fixes are
    indistinguishable — a `go` tag the user deliberately kept in June still
-   reads as `entity` today. Nothing in the data can recover that intent.
+   reads as `entity`. Nothing in the data recovers that intent.
 
 The guarantee therefore reads: **no tag whose provenance is `user`, and no tag
-with unknown or missing provenance, is ever removed. Tags explicitly retained
-by a user before this fix may be removed, and `--dry-run` plus the undo file
-are the mitigation.** That is weaker than revision 2's claim and is the true
-one.
+with unknown or missing provenance, is removed by retag or by a content-only
+update. Tags explicitly retained by a user before these fixes may be removed,
+and `--dry-run` plus the undo file are the mitigation.** Weaker than revision
+2's claim, and true.
 
 ## Migration and the backup allowlist
 
@@ -414,8 +517,19 @@ barrier validate **type, nullability, and default** via
 **The startup barrier must not block its own repair.** The
 missing-column check is invoked by the MCP server, the API, and search paths —
 explicitly **not** by `openbrain migrate` itself, or the only command that can
-fix the problem would refuse to start. Verified afterwards, not assumed: run
-`openbrain backup` post-migration and confirm it still verifies.
+fix the problem would refuse to start.
+
+**And it must not be swallowed.** Both servers currently catch startup
+database errors and carry on: `init_server()` sets `_DB_READY = False` and
+continues, and the FastAPI lifespan catches `init_db()` failure and still
+yields, leaving `/health` reporting healthy. A schema mismatch would therefore
+produce running-but-broken services rather than a barrier. The schema check
+raises a distinct `SchemaMismatchError`. The MCP server lets it escape and
+exits non-zero. The API **cannot** do that and still answer — an exception
+escaping the lifespan means no server to serve 503 — so it catches only this
+exception, records an explicit not-ready state, and serves `/health` as 503
+while every database-backed endpoint returns 503 until migration runs. Verified afterwards, not
+assumed: run `openbrain backup` post-migration and confirm it still verifies.
 
 ## Configuration
 
@@ -459,18 +573,29 @@ use site; MCP tests take symbols from `src.main`.
 | Lexical arm | OR rewrite; empty tsquery disables ILIKE too; `%`, `_` **and `\`** escaped |
 | Branches | all four; `rel_norm` defined once; no-signal branch unblended |
 | Access | `memory_get` increments, `memory_search` does not; REST GET does not; both annotations flipped; failure swallowed; kill switch |
-| Reranker | missing indices appended in SQL order; duplicate/out-of-range/NaN rejected wholesale; `top_n < limit` fills to `limit`; unreachable ⇒ unchanged order |
+| Reranker | bypassed when the query has no text, and `candidate_n` narrows with it; missing indices appended in SQL order; duplicate/out-of-range/NaN rejected wholesale; `top_n < limit` fills to `limit`; unreachable ⇒ unchanged order |
 | Tagger | each sufficient alias; each qualified context with and without its bare token; negatives: "go build a prototype", "I need to go test it", "frontend" alone; `nodejs` single canonical spelling **for generated tags only**, so a user-owned legacy `node` survives |
 | Retag | user and unknown-provenance tags survive; explicit-tag-update-then-retag; provenance-only difference is selected; CAS conflict skipped; content edit then undo refused without `--force`; truncated undo file rejected before first write; concurrent run blocked by lock |
-| Migration | pre-existing column with wrong type/nullability/default fails loudly; `migrate` itself is exempt from the barrier |
+| Migration | pre-existing column with wrong type/nullability/default fails loudly; `migrate` itself is exempt from the barrier; API serves 503 rather than failing to start |
+| REST filters | `importance_min` reaches SQL: a search with a restrictive minimum returns a full page, not a short one |
+| Undo format | plan and applied markers coexist for one id; missing plan or duplicate marker rejected |
 | **Integration** (`-m integration`) | tsquery cast, window scoring and all four branches are valid SQL; LIMIT-promotion actually promotes a pool row; `::uuid[]` update increments |
 
-**Integration tests must not mutate the live corpus.** The access-increment
-test commits its own transaction, so fixture rollback cannot contain it. Each
-integration test inserts a disposable row, operates on that id only, and
-deletes it in a `finally`. Mocked cursors verify shape, never syntax — sub-
-project 1 shipped a zero-vector query no mocked test could validate, and the
-tsquery cast and window scoring are the same trap.
+**Integration tests must not mutate the live corpus — and `finally` is not
+enough.** A disposable row that is committed survives SIGKILL or a power cut,
+and a concurrent nightly backup can capture it. Integration tests therefore
+run against a **separate `openbrain_test` database** created once by the
+developer, selected via the existing `DB_NAME` env override, never against the
+live database. Setting the variable is not proof: `DatabaseConfig` is a
+singleton and the pool is global, so both are reset and reinitialised, and the
+fixture then asserts `SELECT current_database()` **on the actual connection**
+before any committed write. It refuses to run if that query returns the
+production name. Within it, tests use an injected
+connection and roll back a single transaction wherever the code under test
+allows it, and the committed-write path (`record_access`) is exercised only
+there. Mocked cursors verify shape, never syntax — sub-project 1 shipped a
+zero-vector query no mocked test could validate, and the tsquery cast and
+window scoring are the same trap.
 
 ## Risks and accepted risks
 
@@ -487,10 +612,16 @@ tsquery cast and window scoring are the same trap.
 
 ## Rollout order
 
-1. `openbrain migrate` (+ `schema.sql`, column validation, startup barrier
-   exempting migrate); **verify `openbrain backup` still passes**.
-2. Manifest `database` identity in `backup.py` (needed by the retag gate).
-3. Lexical arm + symmetric fusion + restructured query with limit last.
+1. Manifest `database` identity in `backup.py` — **first**, because the retag
+   gate requires an identity-bearing manifest and the newest verified dump
+   would otherwise predate the field, leaving retag unable to run until the
+   next nightly.
+2. `openbrain migrate` (+ `schema.sql`, column validation, startup barrier
+   exempting migrate and not swallowed); then **take a fresh backup and verify
+   it still passes** — this dump carries the identity field from step 1.
+3. Lexical arm + symmetric fusion + restructured query with limit last, and
+   REST passing `importance_min`/`importance_max` into `search_memories`
+   instead of post-filtering.
 4. Blending, clamping, NULLS LAST, config validation, `--explain`.
 5. `update_memory_tags` provenance fix (§5) — **before** any retag run.
 6. Access tracking on `memory_get` + annotation changes + kill switch.
