@@ -4,7 +4,7 @@ SQL queries for Open Brain memory operations.
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .connection import get_db_cursor, get_vector_dim
 
@@ -346,8 +346,7 @@ def delete_memory(memory_id: uuid.UUID) -> bool:
 
 
 def update_memory_tags(memory_id: uuid.UUID, tags: List[str]) -> bool:
-    """Replace the tag list on a memory, preserving provenance for tags that
-    were already present. New tags get source='user'."""
+    """Replace the tag list on a memory. Every submitted tag becomes user-owned."""
     with get_db_cursor() as cursor:
         cursor.execute(
             "SELECT tag_sources FROM memory WHERE id = %s",
@@ -361,12 +360,63 @@ def update_memory_tags(memory_id: uuid.UUID, tags: List[str]) -> bool:
             existing = json.loads(existing)
         existing = existing or {}
 
-        tag_sources = {t: existing.get(t, 'user') for t in tags}
+        # Explicit submission is user intent. Keeping an old automatic
+        # provenance here launders a protected tag into a removable one: the
+        # retag backfill would then be entitled to delete a tag the user
+        # deliberately chose to keep.
+        tag_sources = {t: 'user' for t in tags}
         cursor.execute(
             "UPDATE memory SET tags = %s, tag_sources = %s WHERE id = %s",
             (tags, json.dumps(tag_sources), str(memory_id)),
         )
         return cursor.rowcount > 0
+
+
+PROTECTED_PROVENANCE = ("user",)
+
+
+def merge_tags_for_content_update(
+    memory_id: uuid.UUID,
+    recomputed: Dict[str, str],
+) -> Tuple[List[str], Dict[str, str]]:
+    """Merge recomputed automatic tags over the tags a user owns.
+
+    Recomputing the whole tag set on a content update destroys every
+    hand-added tag, because the tagger only knows what it can derive from the
+    text. Tags whose provenance is `user` - or whose provenance is missing,
+    which is how rows predating provenance tracking look - are retained.
+
+    Protected provenance wins every collision: a stored `python: user` stays
+    `user` even when the recomputation would emit `python: keyword`.
+    Downgrading it would make the tag removable by the retag backfill.
+
+    Read and write happen in one transaction under a row lock, or a
+    concurrent explicit tag update can be read here and overwritten by the
+    stale set computed from it.
+    """
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "SELECT tags, tag_sources FROM memory WHERE id = %s FOR UPDATE",
+            (str(memory_id),),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return list(recomputed), dict(recomputed)
+
+        stored_tags = (row['tags'] if isinstance(row, dict) else row[0]) or []
+        stored_sources = (row['tag_sources'] if isinstance(row, dict) else row[1]) or {}
+        if isinstance(stored_sources, str):
+            stored_sources = json.loads(stored_sources)
+
+    merged: Dict[str, str] = dict(recomputed)
+    for tag in stored_tags:
+        provenance = stored_sources.get(tag)
+        # Missing provenance fails closed: it may be a user tag from before
+        # provenance was tracked, and losing one is worse than keeping noise.
+        if provenance is None or provenance in PROTECTED_PROVENANCE:
+            merged[tag] = 'user'
+
+    return list(merged), merged
 
 
 def update_memory(

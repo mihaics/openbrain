@@ -31,6 +31,7 @@ from db.queries import (
     get_memory_stats,
     update_memory,
     update_memory_tags,
+    merge_tags_for_content_update,
     delete_memory,
     bulk_delete_memories,
     find_duplicate_pairs,
@@ -828,7 +829,15 @@ async def handle_memory_update(args: Dict) -> List[TextContent]:
             existing = await asyncio.to_thread(get_memory_by_id, memory_id)
             effective_source = (existing or {}).get("source")
         tag_map = auto_tag(content, new_entities, effective_source, user_tags or [])
-        new_tags = list(tag_map.keys())
+        if user_tags is None:
+            # Content-only update: recomputed tags merge over the ones the
+            # user owns. Replacing the set outright destroyed every hand-added
+            # tag, since the tagger can only derive what the text implies.
+            new_tags, tag_map = await asyncio.to_thread(
+                merge_tags_for_content_update, memory_id, tag_map
+            )
+        else:
+            new_tags = list(tag_map.keys())
         update_kwargs["content"] = content
         update_kwargs["entities"] = new_entities
         update_kwargs["tags"] = new_tags
