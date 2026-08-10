@@ -1,4 +1,4 @@
-# OpenBrain Auto-Capture — Design (revision 4)
+# OpenBrain Auto-Capture — Design (revision 5)
 
 Scope: sub-project 3 of 4. Sub-projects 1 (reliability) and 2 (retrieval
 quality) shipped 2026-08-10. Sub-project 4 (transcript-search MCP) follows.
@@ -60,8 +60,10 @@ durable; prefer silence to noise.
 ## Non-goals
 
 Not transcript search (sub-project 4). No cloud LLM. No new MCP tools, no
-retrieval changes, **no new PostgreSQL schema object of any kind** (§7). Not a
-replacement for explicit `memory_store`.
+retrieval changes, and exactly **one** new PostgreSQL object — the
+`capture_state` singleton required to make restore detection sound (§6), with
+the backup allowlist updated alongside it (§7). Not a replacement for explicit
+`memory_store`.
 
 ## Component 1 — The hook
 
@@ -203,21 +205,47 @@ The global drain lock is held across all of it.
 rolled back while file progress stays ahead, the next drain sees
 `boundary <= progress`, deletes the retained claims, and never notices that
 the rows they produced vanished — silent loss, and exactly the scenario
-sub-project 1's backups exist for. So progress carries a **generation** that
-must match a generation recorded in the database; a mismatch makes the worker
-**refuse to drain** rather than guess. The restore procedure is therefore:
-stop the timer → restore the database → rebuild or invalidate capture progress
-→ restart the timer. Restoring a matching progress snapshot alongside the
-database is the alternative.
+sub-project 1's backups exist for.
+
+Revision 4 said "progress carries a generation" without defining where it
+lives, which does not survive contact with either failure mode: a **static**
+generation means restoring an older dump keeps the same value, so file
+progress stays trusted and rolled-back facts are silently skipped; a
+generation bumped **per commit** leaves the database at N+1 and the file at N
+after an ordinary crash, and an unconditional mismatch rule then permanently
+blocks the very automatic recovery §6 specifies. There is also no durable
+place in the database to keep it under a no-new-object rule.
+
+So the state becomes explicit, and the "no new schema object" non-goal is
+**withdrawn** for exactly one object — a singleton **`capture_state`** table
+updated *in the same transaction* as the captured rows, holding the current
+generation, the previous generation, and the committed work identity.
+
+Recovery rule: the worker adopts N+1 only when that record proves the pending
+boundary committed. **Every other mismatch refuses to drain.** That
+distinguishes a crash (recoverable, provable) from a restore (not
+recoverable, must stop), which a bare counter cannot.
+
+**This changes backup verification and that is part of the work, not a
+side effect.** `EXPECTED_TOC_ENTRIES` and its `assert len(...) == 19` must be
+updated, along with the backup tests. The new set is **derived empirically**
+from `pg_restore -l` on a real dump after the table exists — never hand-edited
+— because the entry count for a table plus its data and constraints is exactly
+the kind of thing that is guessed wrong. Sub-project 1's allowlist did its job
+here: it forced this to be a deliberate decision instead of a silent schema
+drift.
 
 ## Component 7 — Nothing new in the schema
 
-`backup.py` fails any dump whose TOC differs from its exact 19-entry
-allowlist. This design adds **no table, index, constraint, function or
-sequence**. Idempotence is deterministic ids plus a file, precisely so the
-allowlist and its `assert len(...) == 19` stay untouched. Any future change
-that adds an object must update the allowlist, its assertion, and the backup
-tests together.
+`backup.py` fails any dump whose TOC differs from its exact allowlist. This
+design adds exactly one object, `capture_state` (§6), and therefore updates
+the allowlist, its count assertion, and the backup tests **together, in the
+same task**. The new entries are derived from `pg_restore -l` on a real dump
+rather than predicted.
+
+Nothing else is added: no index, no function, no sequence, and no per-fact
+ledger table. Idempotence remains deterministic ids plus files; only the
+restore interlock needs to be transactional with the data it guards.
 
 ## Component 8 — Secrets, scope, and what "reversible" means
 
