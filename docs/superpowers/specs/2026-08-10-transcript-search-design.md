@@ -1,4 +1,4 @@
-# OpenBrain Transcript Search — Design (revision 3)
+# OpenBrain Transcript Search — Design (revision 5)
 
 Scope: sub-project 4 of 4, the last. Sub-projects 1 (reliability), 2
 (retrieval quality) and 3 (auto-capture) shipped 2026-08-10.
@@ -15,7 +15,7 @@ without that conversation ever entering `memory`.
 | Total size | **282 MB** across the two roots measured; more with the third |
 | **Nested subagent transcripts** | the majority, in `<session>/subagents/agent-*.jsonl` |
 | Conversation fraction | small — 40 of 265 records in a sampled session were human/assistant text; 75 of 85 `user` records were `tool_result` |
-| **Full-corpus scan, measured** | **0.4 s** with a byte prefilter before JSON parsing |
+| **Full parse of 200 transcripts, measured** | **0.6 s**, every record decoded, no prefilter |
 | Memories today | 212 |
 
 Three of these were wrong in earlier revisions and were corrected by
@@ -56,15 +56,14 @@ will surprise someone otherwise.
 
 ## Component 1 — The search
 
-**Measured before designed:** a full scan of all 298 files and 282 MB takes
-**0.4 s**, because a cheap `bytes` containment test rejects almost every line
-before any JSON parsing happens — only 3 000 of 63 000 records in a sample
-needed parsing at all. The index this design refuses to build would save
-nothing a user could perceive, while costing storage, staleness and a backup
-allowlist entry.
+**Measured before designed:** fully parsing 200 transcripts — every record,
+no shortcuts — takes **0.6 s**. The index this design refuses to build would
+save nothing a user could perceive, while costing storage, staleness and a
+backup allowlist entry.
 
-A **recursive** walk over `.jsonl` files under the configured transcript roots,
-newest file first.
+A **recursive** walk over `.jsonl` files under the configured transcript
+roots, traversed in **lexicographic path order** — the same order the cursor
+depends on (see Bounds). Traversal order is never mtime-based.
 
 **The filtering rule is shared; the reader is not.** `read_exchanges()` cannot
 serve search: it does an unbounded `f.read()`, materialises every exchange,
@@ -78,17 +77,24 @@ incremental-boundary behaviour it must not have.
 
 **Path safety.** Roots are canonicalised and de-duplicated when they overlap.
 A candidate must resolve inside a root by `Path.relative_to`, not by string
-prefix. Files are opened with `O_NOFOLLOW` and confirmed a regular file with
-`fstat` on the open descriptor, because checking a path and then opening it by
-name leaves a substitution window. Symlinked files and symlinked directory
+prefix. Files are opened with **`openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`**,
+falling back to a descriptor-relative walk with `openat` and `O_NOFOLLOW` on
+every component. `O_NOFOLLOW` alone protects only the final component: a
+project *directory* swapped for a symlink between resolution and open still
+escapes the root. The descriptor is confirmed a regular file with `fstat`. Symlinked files and symlinked directory
 components are skipped and reported in `truncation_reasons`.
 
 The scan runs in `asyncio.to_thread` so the MCP event loop stays responsive,
 with cooperative deadline checks rather than a cancellation that cannot
 actually stop the work.
 
-Every line is byte-prefiltered before it is parsed; that single decision is
-what makes an index unnecessary.
+**No byte prefilter.** An earlier revision matched raw JSON bytes before
+parsing, which is unsound: JSON escapes, Unicode case folding, content blocks
+joined after decoding, and the `[REDACTED]` text redaction itself inserts can
+all match the decoded string while being absent from the raw line, producing
+**false negatives that look like clean misses**. Every candidate line is
+decoded and matched on the decoded, redacted text. Measured cost of doing it
+honestly: 0.6 s to fully parse 200 files, still far inside the budget.
 
 Subagent transcripts are included — they are 71% of the corpus and contain
 real working detail — but each match reports whether it came from one, since
@@ -109,8 +115,10 @@ Each hit returns: persona, project, session id, kind (`session` or
 **Identity, derived from records rather than paths.** The project comes from
 the record's own `cwd`, never from Claude's encoded directory slug — that slug
 collapses both path separators and literal hyphens into hyphens and cannot be
-decoded back. Timestamps come from records; file mtime is used only to order
-candidates. `since` filters records, not files.
+decoded back. Timestamps come from records. **mtime plays no part in traversal**; it may
+only sort the results of a page *after* the continuation cursor has been
+determined, so it can never move a file across a page boundary. `since`
+filters records, not files.
 
 **Main transcripts match `root/<project-dir>/<UUID>.jsonl`.** Subagent files
 are `.../subagents/agent-*.jsonl` and are included but reported as
@@ -128,7 +136,13 @@ silent boundary on what exists.
 | Matches returned | 20 | A wall of hits is not an answer |
 | Snippet | 240 chars | Enough to recognise, not to dump context |
 | Wall-clock budget | 10 s | Partial results beat hanging |
-| Files scanned | **unbounded**; the time budget terminates the scan | The whole corpus scans in 0.4 s, so a file cap buys nothing and costs reachability |
+| Files scanned | **unbounded**; the time budget terminates the scan | 200 transcripts fully parse in 0.6 s, so a file cap buys nothing and costs reachability |
+
+There **is a per-record byte ceiling of 1 MB**, which is not the per-file cap
+that was rejected. A streaming line reader must consume an entire record
+before it can check any deadline, and `json.loads` cannot be interrupted
+either — so one pathological tool-result line can blow both the time budget
+and memory. Oversized records are skipped with an explicit truncation reason.
 
 There is **no per-file byte cap**. Revision 2 had one without saying which 8 MB
 it kept: the head hides the newest turns of a long session, the tail hides the
@@ -142,8 +156,14 @@ file, malformed record, file replaced mid-scan, skipped symlink — plus
 complete is the worst outcome this tool can produce, so anything less than a
 whole clean scan says so.
 
-**A cursor** of `(mtime, path, record_index)` makes continuation exact, so
-paging never duplicates or skips.
+**The cursor is `(path, record_index)` plus a hash of the query and every
+filter** — *not* mtime. Ordering by mtime is ordering by a mutable key:
+appending to any transcript moves it across the cursor boundary, so a page can
+duplicate or skip records. Traversal order is therefore **lexicographic by
+path**, which does not change when a file is written to. mtime still decides
+which files are *presented* first within a page, but never the traversal.
+A cursor whose query/filter hash does not match is rejected rather than
+silently reinterpreted against a different search.
 
 ## Component 2 — The MCP tool
 
@@ -155,9 +175,15 @@ transcript_search(query, limit=20, project=null, persona=null,
                   since=null, cursor=null, include_subagents=true)
 ```
 
-Returns `{matches: [{persona, project, session_id, kind, parent_session,
+Returns `{matches: [{persona, project, kind, session_id, agent_id,
 timestamp, role, snippet}], scanned_files, elapsed_ms, truncated,
 truncation_reasons, next_cursor}`.
+
+For `kind: session`, `session_id` is the session UUID and `agent_id` is null.
+For `kind: subagent`, `session_id` is the **parent** session UUID and
+`agent_id` is the `agent-*` stem. Both are required: returning only the parent
+collapses every subagent of a session together, and returning only the stem
+gives something that is not a session id at all.
 
 `project` and `persona` **filter metadata; they are never joined into a
 filesystem path.**
@@ -204,11 +230,11 @@ Consequently:
 
 | Risk | Mitigation |
 | --- | --- |
-| Scanning is slow | Measured at 0.4 s for the whole corpus; time budget plus cursor, never an unpageable file cap |
+| Scanning is slow | Measured at 0.6 s to fully parse 200 transcripts with no prefilter; time budget plus cursor, never an unpageable file cap |
 | Regex wedges the server | Regex is not offered |
 | Older transcripts unreachable | Cursor pagination; no file cap |
 | A persona root is missed | All three configured explicitly; a missing root is an error, not a silent omission |
 | Lexical-only surprises a semantic-search user | Documented explicitly in the tool description and README |
-| A secret appears in a snippet | Same redaction as capture; credential-shaped queries refused; nothing leaves the machine |
+| A secret appears in a snippet | Redaction of the whole block before matching and clipping, plus an entropy check. Accepted and stated: pattern-based redaction is incomplete, and snippets **do** leave the machine into the calling agent's context |
 | Transcript format drifts | Filtering reuses the shipped module, so one fix covers capture and search together |
 | Results dwarf `memory_search` in usefulness | Separate tool, separate name; neither can silently absorb the other's job |
