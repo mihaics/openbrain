@@ -1,4 +1,4 @@
-# OpenBrain Auto-Capture — Implementation Plan (revision 5)
+# OpenBrain Auto-Capture — Implementation Plan (revision 7)
 
 **Source spec:** `docs/superpowers/specs/2026-08-10-auto-capture-design.md`
 (**revision 5**, passed). Spec owns design; this plan owns sequencing, file
@@ -278,6 +278,42 @@ narrowed.**
       unrelated session's commit, and restore detection **after** a rebase has
       occurred — the case a naive equality check gets wrong in both
       directions.
+- [ ] **8.2b** **The checkpoint is a durable artifact and joins the crash
+      protocol** — introducing it without that is how the last defect got in.
+      It lives at `<state-root>/generation-checkpoint.json`, written
+      atomically (temp→fsync→replace→dir fsync) **under the drain lock**, and
+      the write order extends §6's:
+
+      **DB commit → checkpoint → per-session boundary progress → delete claim.**
+
+      | Crash window | Recovery |
+      | --- | --- |
+      | After commit, before checkpoint | Checkpoint behind DB with the gap explained by a committed identity → rebase forward |
+      | After checkpoint, before boundary progress | Checkpoint and DB agree, so the generation check passes; the **committed-boundary lookup** still advances that boundary without invoking the model |
+      | After boundary progress, before claim deletion | Stale claim deleted without processing |
+
+      A **missing or corrupt checkpoint refuses to drain, with no exception.**
+      Revision 6 allowed lazy initialization on a "provably pristine" install,
+      which is not provable: restoring a pre-auto-capture database and
+      re-running `migrate` produces exactly `generation = 1` with zero
+      `claude-code-auto` rows, while stale per-session progress may still sit
+      on disk. The worker would initialize the checkpoint, trust those future
+      watermarks, and silently skip everything the restore lost.
+
+      Initialization is therefore an **explicit command**, run under the drain
+      lock before the timer or hook is enabled, and it refuses unless **both**
+      sides are clean:
+
+      - **Filesystem:** no progress, no `.processing` or deferred claims, no
+        retry counters, no dead letters, no reprocess state, no reconcile
+        intent.
+      - **Database:** `generation = 1`, `previous_generation` and
+        `committed_work_identity` null, `reprocess_counter = 0`,
+        `active_reprocess` null, and zero `claude-code-auto` rows.
+
+      Anything else refuses and directs the operator to `capture --reconcile`.
+- [ ] **8.2c** Tests: crashes on **both sides** of the checkpoint write, and a
+      drain refused when the checkpoint is ahead of the database.
 - [ ] **8.3** Ceiling, with the actual values rather than a promise to state
       them. The day is **UTC by the database clock** — the laptop runs
       Europe/Bucharest, which observes DST, so a local day boundary would
@@ -359,7 +395,15 @@ narrowed.**
          restored database. Each class is explicitly rebuilt, invalidated or
          requeued, and each is tested. Rewriting progress alone leaves the
          worker permanently blocked or deletes work it should have redone.
-      6. Clear the intent last.
+         Tested specifically with a checkpoint **ahead** of the restored
+         database.
+      6. **Set the global generation checkpoint to the intent's target
+         generation** — before clearing the intent. Without this, restoring a
+         database at generation 5 while the checkpoint sits at 10 lets
+         `--reconcile` finish and clear its intent while every subsequent
+         drain still refuses, because the filesystem remains ahead. Reconcile
+         would appear to succeed and fix nothing.
+      7. Clear the intent last.
 
       The intent lives at `<state-root>/reconcile-intent.json`, written with
       the same temp→fsync→replace→dir-fsync protocol as every other durable
