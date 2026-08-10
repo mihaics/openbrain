@@ -129,6 +129,21 @@ def main():
     get_parser.add_argument('memory_id', help='Memory UUID')
     get_parser.add_argument('--json', action='store_true', help='Output as JSON')
 
+    retag_parser = subparsers.add_parser(
+        'retag', help='Recompute tags with the corrected tagger (reversible)'
+    )
+    retag_parser.add_argument('--dry-run', action='store_true',
+                              help='Report what would change, write nothing')
+    retag_parser.add_argument('--limit', '-n', type=int,
+                              help='Only process this many changed rows')
+    retag_parser.add_argument('--max-backup-age', type=float, default=24,
+                              help='Hours; refuse if the newest verified '
+                                   'backup is older (default: 24)')
+    retag_parser.add_argument('--undo', metavar='FILE',
+                              help='Revert a previous backfill')
+    retag_parser.add_argument('--force', action='store_true',
+                              help='Override identity/schema checks on --undo')
+
     subparsers.add_parser(
         'migrate', help='Apply additive schema changes (idempotent)'
     )
@@ -176,6 +191,9 @@ def main():
         elif args.command == 'get':
             from .get import get_memory_cmd
             return get_memory_cmd(args)
+        elif args.command == 'retag':
+            from .retag import retag_cmd
+            return retag_cmd(args)
         elif args.command == 'migrate':
             from .migrate import migrate_cmd
             return migrate_cmd(args)

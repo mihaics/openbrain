@@ -8,6 +8,13 @@ from typing import Dict, List, Optional, Set
 
 import yaml
 
+from .entities import (
+    AMBIGUOUS_TECH,
+    CANONICAL_TECH,
+    SUFFICIENT_ALIASES,
+    _emit_tech,
+)
+
 
 class TagConfig:
     """Configuration for tagger."""
@@ -210,11 +217,31 @@ class Tagger:
         tags: Dict[str, str] = {}
 
         # Layer 1: Keyword-based tagging (word-boundary, not substring)
+        #
+        # Ambiguous technology terms go through the same guard the entity
+        # extractor uses. Without it this layer re-adds `go` for "let's go
+        # through the backlog" even after entity extraction has correctly
+        # declined to - the two layers must agree or the noise comes back.
+        lowered = text.lower()
         for pattern, tag in self._keyword_patterns:
             if tag in self.deny_list:
                 continue
-            if pattern.search(text):
+            if not pattern.search(text):
+                continue
+            if tag in AMBIGUOUS_TECH or tag in CANONICAL_TECH:
+                emitted = _emit_tech(tag, lowered)
+                if not emitted:
+                    continue
+                tags[emitted] = 'keyword'
+            else:
                 tags[tag] = 'keyword'
+
+        # Aliases imply the technology without the bare keyword appearing.
+        for canonical, aliases in SUFFICIENT_ALIASES.items():
+            if canonical in self.deny_list:
+                continue
+            if any(re.search(a, lowered) for a in aliases):
+                tags[canonical] = 'keyword'
         
         # Layer 2: Pattern-based tagging
         for pattern_args in self.pattern_tags:
