@@ -1,5 +1,11 @@
 # OpenBrain Retrieval Quality — Implementation Plan (revision 7)
 
+> **Status: complete (2026-08-10).** All tasks executed and verified against
+> the live database. Two live bugs found during review were fixed as part of
+> the work: content updates destroying user tags, and REST `importance_min`
+> filtering after the SQL limit. A third, `openbrain stats` failing with
+> `slice(None, 10, None)`, was confirmed pre-existing and left out of scope.
+
 **Source spec:** `docs/superpowers/specs/2026-08-10-retrieval-quality-design.md`
 (**revision 9**, passed adversarial review). The spec owns every design
 decision; this plan owns sequencing, file-level mechanics, and verification.
@@ -80,9 +86,9 @@ DB_NAME=openbrain_test .venv/bin/openbrain migrate    # adds the two columns
 unset PGPASSWORD
 ```
 
-- [ ] **0.1** Provision as above, then confirm
+- [x] **0.1** Provision as above, then confirm
       `psql ... -d openbrain_test -c '\d memory'` shows both new columns.
-- [ ] **0.2** Add the `integration` fixture in `tests/conftest.py`. It must
+- [x] **0.2** Add the `integration` fixture in `tests/conftest.py`. It must
       handle **both database-module identities**: `src/main.py` and
       `src/api/main.py` load `db.connection` while the CLI and tests load
       `src.db.connection`, and each carries its own `DatabaseConfig._instance`
@@ -92,12 +98,12 @@ unset PGPASSWORD
       pool and clears each singleton, points `DB_NAME` at `openbrain_test`,
       and asserts `SELECT current_database()` **on the connection the code
       under test actually mutates through**.
-- [ ] **0.3** The fixture **fails** — never skips — when `-m integration` was
+- [x] **0.3** The fixture **fails** — never skips — when `-m integration` was
       explicitly requested and the database is absent, and fails if
       `current_database()` returns the production name. A silent skip would
       let the SQL-validity verification be bypassed, which is the one thing
       mocked tests cannot cover.
-- [ ] **0.4** Commit: `test: provision an isolated integration database`
+- [x] **0.4** Commit: `test: provision an isolated integration database`
 
 ---
 
@@ -109,12 +115,12 @@ identity and retag refuses to run until the next nightly.
 
 **Files:** modify `src/cli/backup.py`, `tests/test_backup.py`
 
-- [ ] **1.1** Failing test: `take_dump` writes `database: {host, port, name}`
+- [x] **1.1** Failing test: `take_dump` writes `database: {host, port, name}`
       into the manifest, sourced from `DatabaseConfig`, and never the password.
-- [ ] **1.2** Add the field in both the success and `.unverified` manifest
+- [x] **1.2** Add the field in both the success and `.unverified` manifest
       paths (recovery needs it as much as a clean dump).
-- [ ] **1.3** `status_report` surfaces `newest_database_identity`.
-- [ ] **1.3b** Make the backup root overridable via `OPENBRAIN_BACKUP_DIR`
+- [x] **1.3** `status_report` surfaces `newest_database_identity`.
+- [x] **1.3b** Make the backup root overridable via `OPENBRAIN_BACKUP_DIR`
       (falling back to `~/backups/openbrain`), and derive the retag lock,
       `.retag-sequence` and undo paths from the same root. Without this, any
       test-database backfill would read production manifests — failing
@@ -123,9 +129,9 @@ identity and retag refuses to run until the next nightly.
       backup-root resolver only — `src/cli/retag.py` does not exist until
       Task 9, so nothing here can verify the lock, sequence or undo paths.
       Task 9 owns asserting those actually derive from the override.
-- [ ] **1.4** Full suite green; run `openbrain backup` for real and confirm
+- [x] **1.4** Full suite green; run `openbrain backup` for real and confirm
       the new dump's `.json` contains the field and still verifies.
-- [ ] **1.5** Commit: `feat(backup): record database identity in the manifest`
+- [x] **1.5** Commit: `feat(backup): record database identity in the manifest`
 
 ---
 
@@ -139,34 +145,34 @@ identity and retag refuses to run until the next nightly.
 `validate_schema() -> None` raising `SchemaMismatchError`;
 `migrate_cmd(args) -> int`.
 
-- [ ] **2.1** Failing tests: both columns added; re-running is a no-op; a
+- [x] **2.1** Failing tests: both columns added; re-running is a no-op; a
       pre-existing `access_count` of the wrong type, nullability, or default
       **fails loudly** rather than passing an existence check; both ALTERs run
       in one transaction; `migrate` itself is exempt from the barrier.
-- [ ] **2.2** Implement `migrate_cmd`: two `ADD COLUMN IF NOT EXISTS` in a
+- [x] **2.2** Implement `migrate_cmd`: two `ADD COLUMN IF NOT EXISTS` in a
       single transaction. **No other schema object.**
-- [ ] **2.3** Implement `validate_schema()` reading `information_schema.columns`
+- [x] **2.3** Implement `validate_schema()` reading `information_schema.columns`
       and checking name, type, nullability, default.
-- [ ] **2.4** Wire the barrier so it **cannot be swallowed**:
+- [x] **2.4** Wire the barrier so it **cannot be swallowed**:
       `init_server()` currently catches everything and sets `_DB_READY=False`;
       the FastAPI lifespan catches `init_db()` failure and still yields with
       `/health` healthy. `SchemaMismatchError` must bypass both — MCP exits
       non-zero; the API records not-ready, and the **shared readiness guard**
       (not `/health` alone) rechecks on any blocked database request once a
       10s cache expires, so migrating clears it without a restart.
-- [ ] **2.5** Add the columns to `schema.sql` for fresh installs.
-- [ ] **2.6** Register `migrate` in the CLI, exempt from the barrier.
-- [ ] **2.7** Barrier tests, not just the validator: MCP **propagates**
+- [x] **2.5** Add the columns to `schema.sql` for fresh installs.
+- [x] **2.6** Register `migrate` in the CLI, exempt from the barrier.
+- [x] **2.7** Barrier tests, not just the validator: MCP **propagates**
       `SchemaMismatchError` and exits non-zero; the API returns 503 from
       `/health` **and** from database-backed endpoints; the shared guard
       clears the state after a successful migration without a restart.
-- [ ] **2.8** **Full suite green first**, then run `openbrain migrate` against
+- [x] **2.8** **Full suite green first**, then run `openbrain migrate` against
       the live database, then **`openbrain backup` and confirm it still
       verifies** (columns must not alter the 19-entry TOC). Migrating before
       the suite passes mutates the schema on unverified code. **Production
       only** — `openbrain_test` does not exist yet and is migrated by Task 0,
       which runs next.
-- [ ] **2.9** Commit: `feat(db): add access columns with validated migration`
+- [x] **2.9** Commit: `feat(db): add access columns with validated migration`
 
 ---
 
@@ -176,19 +182,19 @@ identity and retag refuses to run until the next nightly.
 modify `config/settings.yaml`, `src/main.py`, `src/api/main.py`,
 `src/cli/__init__.py`
 
-- [ ] **3.1** Failing tests for the spec's config table: defaults when the
+- [x] **3.1** Failing tests for the spec's config table: defaults when the
       block is absent; per-field env override; **`w_rec+w_imp+w_acc > 0.10`
       rejected**; negative weight, `half_life_days <= 0`, `access_cap <= 0`
       rejected; rerank enabled without `url`/`model` rejected; the offending
       key is named in the error.
-- [ ] **3.2** Implement `RankingConfig` mirroring `DatabaseConfig`'s
+- [x] **3.2** Implement `RankingConfig` mirroring `DatabaseConfig`'s
       YAML-then-env-per-field pattern. Validation runs at load.
-- [ ] **3.3** **Wire it into startup** — `src/main.py`, `src/api/main.py`,
+- [x] **3.3** **Wire it into startup** — `src/main.py`, `src/api/main.py`,
       `src/cli/__init__.py`. Creating the module alone cannot deliver "invalid
       configuration fails at startup"; without this it would first load on the
       first search, which is exactly the behaviour the spec rejects. Test that
       an invalid config fails MCP and API startup, naming the key.
-- [ ] **3.4** Full suite. Commit: `feat(config): add validated ranking configuration`
+- [x] **3.4** Full suite. Commit: `feat(config): add validated ranking configuration`
 
 ---
 
@@ -199,42 +205,42 @@ The core fix. No data mutation; revertible by deploying the previous commit.
 **Files:** modify `src/db/queries.py`, `src/api/main.py`, `src/cli/search.py`,
 `src/main.py`; create `tests/test_retrieval.py`
 
-- [ ] **4.1** Failing tests: generated SQL ORs lexemes via
+- [x] **4.1** Failing tests: generated SQL ORs lexemes via
       `replace(plainto_tsquery(...)::text,' & ',' | ')::tsquery` in a single
       leading CTE; both arms use `k=60`; `%`, `_` **and `\`** escaped with
       `ESCAPE '\'`; an empty tsquery disables the **whole** lexical arm
       including ILIKE; every `DESC` carries `NULLS LAST`; `ROW_NUMBER`
       orderings end `, id`; the caller `LIMIT` appears exactly once and last.
-- [ ] **4.2** Rewrite the branches to the spec's structural order: arms →
+- [x] **4.2** Rewrite the branches to the spec's structural order: arms →
       full outer join → `rrf` → order by `rrf` → `LIMIT :candidate_n`.
       **The current code applies the caller's LIMIT inside the `rrf` CTE;
       that is the bug being removed.** Normalization, secondary blending and
       promotion are **Task 5's** exclusively — this task stops at relevance
       ordering and the final limit, so the two tasks cannot both claim to
       introduce blending.
-- [ ] **4.3** `candidate_n = limit` and SQL truncates — **the widening path
+- [x] **4.3** `candidate_n = limit` and SQL truncates — **the widening path
       is deliberately not built here.** Widening `candidate_n` without an
       application-side reranker and truncation (Task 10) would let a valid
       enabled configuration over-return for the whole of Tasks 4–9. Widening,
       reranking and truncation land atomically in Task 10.
-- [ ] **4.4** Validate `limit >= 1` in MCP, REST, and CLI before computing
+- [x] **4.4** Validate `limit >= 1` in MCP, REST, and CLI before computing
       `pool`/`candidate_n` (only MCP clamps today; `LIMIT -1` is a PG error).
-- [ ] **4.5** **All four branches are rewritten and tested here**, not just
+- [x] **4.5** **All four branches are rewritten and tested here**, not just
       hybrid: hybrid, text-only, vector-only, and no-signal, including filter
       parameter ordering — the filter clause is interpolated into both arms
       and its params are passed twice, which is exactly where a restructure
       breaks silently.
-- [ ] **4.6** **Live bug fix:** REST `/memories/search` passes
+- [x] **4.6** **Live bug fix:** REST `/memories/search` passes
       `importance_min` **and** `importance_max` into `search_memories`.
       `MemorySearch` has no `importance_max` field today (verified), so the
       model gains one. Test: a restrictive minimum returns a full page.
-- [ ] **4.7** Integration test (`-m integration`, requires Task 0): the
+- [x] **4.7** Integration test (`-m integration`, requires Task 0): the
       tsquery cast and **all four branches** are valid SQL. The
       LIMIT-promotion test belongs to Task 5, which implements blending.
-- [ ] **4.8** Full suite; then fixed probe queries with expected ids and
+- [x] **4.8** Full suite; then fixed probe queries with expected ids and
       order, recorded in the test file — "results look sensible" is not a
       verification.
-- [ ] **4.9** Commit: `fix(search): let both retrieval arms win`
+- [x] **4.9** Commit: `fix(search): let both retrieval arms win`
 
 ---
 
@@ -243,24 +249,24 @@ The core fix. No data mutation; revertible by deploying the previous commit.
 **Files:** modify `src/db/queries.py`, `src/cli/search.py`, `src/cli/__init__.py`;
 modify `tests/test_retrieval.py`
 
-- [ ] **5.1** Failing tests: NULL `created_at` ⇒ recency **0, not 1**
+- [x] **5.1** Failing tests: NULL `created_at` ⇒ recency **0, not 1**
       (`GREATEST(NULL,0)` is `0`); future date ⇒ ≤ 1; NULL/out-of-range
       importance clamped; negative `access_count` clamped; the access ratio is
       **not** integer-divided to 0; an all-zero `rel_raw` set yields score 0,
       not NULL.
-- [ ] **5.2** Boundary test: construct rows at a known `rel_norm` gap; assert
+- [x] **5.2** Boundary test: construct rows at a known `rel_norm` gap; assert
       gap > 0.10 ⇒ no flip, gap < 0.10 ⇒ flip possible, with a tolerance
       rather than bit-exact equality.
-- [ ] **5.3** Implement blending in SQL per the spec, with `rel_raw` defined
+- [x] **5.3** Implement blending in SQL per the spec, with `rel_raw` defined
       per branch and `rel_norm` computed once.
-- [ ] **5.4** Integration test: a row outside the pre-blend caller limit is
+- [x] **5.4** Integration test: a row outside the pre-blend caller limit is
       **actually promoted** into the top N. This lives here because Task 5 is
       where blending exists; asserting it in Task 4 would test nothing.
-- [ ] **5.5** `--explain` / `--explain --json` with the per-branch field
+- [x] **5.5** `--explain` / `--explain --json` with the per-branch field
       matrix; `degraded: true` on embedding failure. **Ordinary
       `search --json` keeps its current shape**; explain fields never enter
       MCP or REST payloads, and `include_score` still returns one `score`.
-- [ ] **5.6** Full suite. Commit: `feat(search): blend recency, importance and usage`
+- [x] **5.6** Full suite. Commit: `feat(search): blend recency, importance and usage`
 
 ---
 
@@ -269,19 +275,19 @@ modify `tests/test_retrieval.py`
 **Files:** modify `src/db/queries.py`, `src/main.py`; create
 `tests/test_tag_provenance.py`
 
-- [ ] **6.1** Failing test reproducing the live bug: update a memory's
+- [x] **6.1** Failing test reproducing the live bug: update a memory's
       `content` through `handle_memory_update` with **no** `tags` argument and
       assert a pre-existing `user` tag survives. It does not today —
       `auto_tag(content, entities, source, user_tags or [])` replaces the set.
-- [ ] **6.2** `update_memory_tags` stamps provenance `user` on every
+- [x] **6.2** `update_memory_tags` stamps provenance `user` on every
       explicitly submitted tag.
-- [ ] **6.3** Content-only updates **merge** recomputed automatic tags with
+- [x] **6.3** Content-only updates **merge** recomputed automatic tags with
       retained `user`/unknown ones, **protected provenance winning every
       collision**, under `SELECT ... FOR UPDATE` in one transaction so a
       concurrent explicit tag update cannot be read-then-overwritten.
-- [ ] **6.4** Test the collision rule directly: stored `python: user` plus
+- [x] **6.4** Test the collision rule directly: stored `python: user` plus
       recomputed `python: keyword` stays `user`.
-- [ ] **6.5** Commit: `fix(tags): stop content updates from deleting user tags`
+- [x] **6.5** Commit: `fix(tags): stop content updates from deleting user tags`
 
 ---
 
@@ -290,24 +296,24 @@ modify `tests/test_retrieval.py`
 **Files:** modify `src/main.py`, `src/cli/__init__.py`, `src/db/queries.py`;
 create `src/cli/get.py`, `tests/test_access_tracking.py`
 
-- [ ] **7.1** Failing tests: `memory_get` increments; **`memory_search` does
+- [x] **7.1** Failing tests: `memory_get` increments; **`memory_search` does
       not**; REST `GET /memories/{id}` does not; a failing update is swallowed
       and the read still returns; the kill switch disables both writes and the
       annotation change.
-- [ ] **7.2** `record_access(ids)` **in `src/db/queries.py`**, so the MCP
+- [x] **7.2** `record_access(ids)` **in `src/db/queries.py`**, so the MCP
       handler and the CLI share one implementation rather than duplicating it,
       using `WHERE id = ANY(%s::uuid[])` — the
       cast is required, and because failures are swallowed its absence would
       silently disable tracking forever. Runs after the read transaction
       commits, before the handler returns, in its own transaction.
-- [ ] **7.3** Call it from the MCP `memory_get` handler and a new
+- [x] **7.3** Call it from the MCP `memory_get` handler and a new
       `openbrain get ID` CLI command — there is no fetch-by-id CLI command
       today, and instrumenting CLI `search` would violate the no-search rule.
-- [ ] **7.4** Flip **both** `readOnlyHint` and `idempotentHint` to `False` for
+- [x] **7.4** Flip **both** `readOnlyHint` and `idempotentHint` to `False` for
       `memory_get` only; `memory_search` keeps its read-only annotation.
-- [ ] **7.5** Integration test in `openbrain_test`: the counter actually
+- [x] **7.5** Integration test in `openbrain_test`: the counter actually
       increments.
-- [ ] **7.6** Commit: `feat(search): track explicit memory access`
+- [x] **7.6** Commit: `feat(search): track explicit memory access`
 
 ---
 
@@ -317,23 +323,23 @@ create `src/cli/get.py`, `tests/test_access_tracking.py`
 `config/settings.yaml`, `src/setup/__init__.py`; create
 `tests/test_tagger_guards.py`
 
-- [ ] **8.1** Failing tests from the spec's two tables: every sufficient alias
+- [x] **8.1** Failing tests from the spec's two tables: every sufficient alias
       emits without the bare token; every qualified context requires both;
       **negatives — "go build a prototype", "I need to go test it",
       "frontend" alone — emit nothing**; `go1.24` is matched as an alias
       (`\bgo\b` does not match it, verified); canonicalization applies to
       generated tags only, so a user-owned legacy `node` survives.
-- [ ] **8.2** Implement the guard at entity extraction; route entity→tag
+- [x] **8.2** Implement the guard at entity extraction; route entity→tag
       conversion through the same canonicalization table as the keyword layer,
       so `node`/`nodejs` cannot both enter.
-- [ ] **8.3** Empty `default_tags` in `config/settings.yaml` **and close the
+- [x] **8.3** Empty `default_tags` in `config/settings.yaml` **and close the
       two paths that reintroduce it** (both verified): `src/setup/__init__.py`
       writes `'default_tags': ['auto']` into generated config, and
       `TagConfig` falls back to `['auto']` when the key is absent. Emptying
       the YAML alone leaves `auto` one fresh setup or one missing key away.
       Tested.
-- [ ] **8.4** Full suite, then commit.
-- [ ] **8.5** **Then** `systemctl --user restart openbrain-api` and restart
+- [x] **8.4** Full suite, then commit.
+- [x] **8.5** **Then** `systemctl --user restart openbrain-api` and restart
       MCP clients — `TagConfig` and the tagger are process singletons, so a
       live process would re-add `auto` while the backfill removes it.
       `openbrain-web` needs no restart; it does not run the Python tagger.
@@ -354,7 +360,7 @@ The only destructive task. Everything in spec §3.2 is load-bearing.
 **Files:** create `src/cli/retag.py`, `tests/test_retag.py`; modify
 `src/cli/__init__.py`
 
-- [ ] **9.1** Failing tests: `user` and unknown-provenance tags survive; a
+- [x] **9.1** Failing tests: `user` and unknown-provenance tags survive; a
       provenance-only difference is selected by `--limit`; forward CAS
       conflict is skipped and reported; undo round-trips; a content edit after
       the backfill makes undo refuse without `--force`; a malformed mid-file
@@ -363,7 +369,7 @@ The only destructive task. Everything in spec §3.2 is load-bearing.
       reported indeterminate and **never restored automatically, including
       when the row still matches `after_*`**; a concurrent run is blocked by
       the lock; `--undo` refuses on mismatched database identity.
-- [ ] **9.2** Implement: `flock` on `.retag.lock`; backup gate requiring
+- [x] **9.2** Implement: `flock` on `.retag.lock`; backup gate requiring
       `0 <= age < max` **and** matching manifest database identity, exempt for
       `--undo`; undo file `O_CREAT|O_EXCL`, 0600, fsynced, own
       `.retag-sequence`, header with database identity and schema-version
@@ -371,16 +377,16 @@ The only destructive task. Everything in spec §3.2 is load-bearing.
       `IS NOT DISTINCT FROM` for the nullable columns; **applied marker
       appended and fsynced after commit**; undo CAS on `after_*`, `source`,
       and `md5(content)` evaluated in SQL.
-- [ ] **9.3** Explicit mechanics the plan owns, not just the spec: entities
+- [x] **9.3** Explicit mechanics the plan owns, not just the spec: entities
       are **re-extracted from content in memory and never written back**; the
       header and **every plan record are written and fsynced, and the parent
       directory fsynced, before the first mutation**; the whole file —
       record-type uniqueness, `applied`→`plan` references, database identity,
       schema hash — is validated before any write.
-- [ ] **9.4** Gate tests: retag refuses with no backup, a stale backup, a
+- [x] **9.4** Gate tests: retag refuses with no backup, a stale backup, a
       **future-dated** backup, and a mismatched database identity; `--undo`
       alone is exempt from the age gate.
-- [ ] **9.5** **Integration test end to end on `openbrain_test`**, not just
+- [x] **9.5** **Integration test end to end on `openbrain_test`**, not just
       mocked units. Prerequisites, because forward retag demands a fresh
       verified backup whose manifest identity matches the target database:
       point `OPENBRAIN_BACKUP_DIR` at a temporary directory, run
@@ -397,7 +403,7 @@ The only destructive task. Everything in spec §3.2 is load-bearing.
       the temporary root**, and the production root is byte-for-byte
       unchanged. Setting the environment variable proves only that the
       variable was set.
-- [ ] **9.6** Full suite. Commit the implementation — `feat(cli): add retag
+- [x] **9.6** Full suite. Commit the implementation — `feat(cli): add retag
       backfill with undo` — **before** any live run.
 
 ---
@@ -407,14 +413,14 @@ The only destructive task. Everything in spec §3.2 is load-bearing.
 Separated because revision 1 performed the destructive live run *before*
 committing the code that performs it.
 
-- [ ] **9-OPS.1** Confirm Task 8's restart happened and no live process still
+- [x] **9-OPS.1** Confirm Task 8's restart happened and no live process still
       emits `auto`.
-- [ ] **9-OPS.2** `openbrain backup`; confirm verified **and** that its
+- [x] **9-OPS.2** `openbrain backup`; confirm verified **and** that its
       manifest carries the database identity from Task 1.
-- [ ] **9-OPS.3** `openbrain retag --dry-run`; expect `auto` on ~186 rows and
+- [x] **9-OPS.3** `openbrain retag --dry-run`; expect `auto` on ~186 rows and
       `go` on ~20–25. **Review the counts before proceeding.**
-- [ ] **9-OPS.4** Real run.
-- [ ] **9-OPS.5** Verify recoverability *mechanically*, not by eyeballing:
+- [x] **9-OPS.4** Real run.
+- [x] **9-OPS.5** Verify recoverability *mechanically*, not by eyeballing:
       run `openbrain retag --undo FILE --dry-run`, confirm every mutated row
       has an applied marker and none is reported indeterminate. Then verify
       protected tags **through provenance, not tag names**: for each undo
@@ -432,7 +438,7 @@ committing the code that performs it.
 **Files:** create `src/rerank/__init__.py`, `tests/test_rerank.py`; modify
 `src/db/queries.py` call path, `src/cli/search.py` (rerank explain fields)
 
-- [ ] **10.1** Failing tests: bypassed when the query has no text; ordering by
+- [x] **10.1** Failing tests: bypassed when the query has no text; ordering by
       `relevance_score DESC, original_sql_index ASC` (array order not
       trusted); absent indices keep SQL order and are appended; duplicate,
       out-of-range, NaN or infinite scores reject the response wholesale;
@@ -442,14 +448,14 @@ committing the code that performs it.
       "exactly `limit`" is impossible when filters or corpus size yield fewer
       candidates, and fill-to-limit applies only when at least `limit`
       candidates exist; unreachable ⇒ unchanged order.
-- [ ] **10.1b** Candidate widening (`pool`/`candidate_n` on
+- [x] **10.1b** Candidate widening (`pool`/`candidate_n` on
       `rerank_applicable`) and application-side truncation land **in this
       task, atomically with the reranker**, plus the `rerank_score` /
       `rerank_order` / `rerank_degraded` explain fields — which means this
       task also modifies `src/cli/search.py`.
-- [ ] **10.2** Implement behind `ranking.rerank.enabled` (default false), with
+- [x] **10.2** Implement behind `ranking.rerank.enabled` (default false), with
       the `top_n ≤ 200`, 1 MB request and 4 KB per-document caps.
-- [ ] **10.3** Commit: `feat(search): add optional reranker seam`
+- [x] **10.3** Commit: `feat(search): add optional reranker seam`
 
 ---
 
@@ -457,12 +463,12 @@ committing the code that performs it.
 
 **Files:** modify `README.md`, MCP tool descriptions in `src/main.py`
 
-- [ ] **11.1** Document retrieval: hybrid fusion, the blending window,
+- [x] **11.1** Document retrieval: hybrid fusion, the blending window,
       `--explain`, and **query input as literal natural language with no
       operator syntax** (`-foo` is not negation and never was).
-- [ ] **11.2** Document `openbrain migrate`, `openbrain get`, `openbrain
+- [x] **11.2** Document `openbrain migrate`, `openbrain get`, `openbrain
       retag`, and the `openbrain_test` requirement for integration tests.
-- [ ] **11.3** Run every documented command before claiming it works — the
+- [x] **11.3** Run every documented command before claiming it works — the
       sub-project 1 lesson — but **destructive examples (`retag`, `retag
       --undo`) run only against `openbrain_test`**. Against production, verify
       with `--help` and `--dry-run` only. A documentation check must not be
@@ -474,7 +480,7 @@ committing the code that performs it.
       (`DB_NAME=openbrain_test OPENBRAIN_BACKUP_DIR=<tmp> openbrain backup`).
       An empty directory makes forward `retag` fail its backup gate, so the
       documented example could never run at all.
-- [ ] **11.4** Commit: `docs: describe retrieval behaviour and new commands`
+- [x] **11.4** Commit: `docs: describe retrieval behaviour and new commands`
 
 ---
 

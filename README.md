@@ -204,6 +204,63 @@ Example tool call:
 }
 ```
 
+
+## Retrieval
+
+Search fuses PostgreSQL full-text with pgvector similarity using Reciprocal
+Rank Fusion, then adjusts the order with bounded secondary signals.
+
+**Query input is literal natural language.** There is no operator syntax:
+`-foo` does not negate, quotes do not force a phrase, and `|` is not an OR.
+`plainto_tsquery` discards those characters before OpenBrain sees them, so
+they are matched as ordinary words.
+
+Both arms use the same RRF constant, so either can reach the top. Earlier
+versions used k=1 for text and k=60 for vectors, which capped the best
+semantic match below the twentieth-best keyword match - vector similarity
+could only break ties among rows the keyword arm had already found.
+
+Ordering also accounts for recency, importance and usage:
+
+```
+score = normalized_relevance
+      + 0.05 * recency        (exponential decay, 180-day half-life)
+      + 0.03 * importance
+      + 0.02 * access         (explicit fetches, capped at 10)
+```
+
+The three secondary weights are capped at 0.10 in total and the bound is
+enforced at startup, so they reorder rows of similar relevance without ever
+overriding it. Tune them under `ranking:` in `config/settings.yaml`.
+
+```bash
+openbrain search "how are backups verified" --explain
+```
+
+`--explain` prints the per-result breakdown - which branch ran, the raw and
+normalized relevance, and each signal's contribution - so a surprising result
+can be diagnosed instead of guessed at.
+
+## Tags
+
+Tags carry provenance: `user`, `keyword`, `pattern`, `entity`, `source`. Only
+`user` tags are protected, and tags with missing provenance are treated as
+protected too, since rows predating provenance tracking cannot be
+distinguished from deliberate ones.
+
+```bash
+openbrain retag --dry-run            # what would change
+openbrain retag                      # rewrite, needs a fresh verified backup
+openbrain retag --undo FILE --dry-run
+openbrain retag --undo FILE          # revert
+```
+
+`retag` refuses to run without a verified backup of *this* database from the
+last 24 hours, writes an undo file before touching a row, and updates each row
+under compare-and-set so a concurrently edited memory is skipped rather than
+clobbered. `--undo` is exempt from the backup gate, because it must work in
+exactly the emergency where the backup is stale.
+
 ## REST API
 
 Common endpoints:
@@ -260,6 +317,9 @@ openbrain exec "ls -la"
 openbrain exec --sandbox --timeout 120 "python -V"
 openbrain reembed --dry-run
 openbrain backup --status
+openbrain get <memory-id>       # fetch one memory; counts as an access
+openbrain migrate               # apply additive schema changes
+openbrain retag --dry-run       # preview tag cleanup
 ```
 
 ## Configuration
@@ -300,8 +360,23 @@ Indexes include pgvector HNSW for embeddings, GIN for tags/entities, and full-te
 .venv/bin/python -m pytest -q
 ```
 
-Tests marked `integration` need the live cluster and are deselected by
-default; run them with `-m integration`.
+Tests marked `integration` are deselected by default and run against a
+**separate `openbrain_test` database**, never the live corpus:
+
+```bash
+sudo -u postgres createdb -p 5433 -O openbrain openbrain_test
+sudo -u postgres psql -p 5433 -d openbrain_test \
+  -c 'CREATE EXTENSION "uuid-ossp"' -c 'CREATE EXTENSION vector'
+psql -h 127.0.0.1 -p 5433 -U openbrain -d openbrain_test -f src/db/schema.sql
+DB_NAME=openbrain_test .venv/bin/openbrain migrate
+
+.venv/bin/python -m pytest -m integration
+```
+
+The superuser commands use `-p 5433` without `-h`: adding `-h` forces TCP,
+where `sudo -u postgres` supplies no credential, and omitting `-p` targets a
+different cluster on 5432. The fixture fails rather than skips if the database
+is missing, and refuses to run if it resolves to the production database.
 
 Useful checks:
 

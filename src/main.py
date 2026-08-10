@@ -330,7 +330,7 @@ TOOLS: List[Tool] = [
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Text search query"},
+                    "query": {"type": "string", "description": "Text search query. Literal natural language - there is no operator syntax: '-foo' does not negate, quotes do not force a phrase, and '|' is not an OR. Such characters are matched as ordinary words."},
                     "limit": {"type": "integer", "description": "Max results (1-200, default 10)", "default": 10, "minimum": 1, "maximum": 200},
                     "sources": {"type": "array", "items": {"type": "string"}, "description": "Filter by source values (e.g. claude-code, manual, web, mcp)"},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by tags: OR semantics — memory must contain any of these"},
