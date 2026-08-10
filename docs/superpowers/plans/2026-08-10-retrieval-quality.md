@@ -1,4 +1,4 @@
-# OpenBrain Retrieval Quality — Implementation Plan (revision 2)
+# OpenBrain Retrieval Quality — Implementation Plan (revision 3)
 
 **Source spec:** `docs/superpowers/specs/2026-08-10-retrieval-quality-design.md`
 (**revision 9**, passed adversarial review). The spec owns every design
@@ -41,31 +41,47 @@ and skips this has not been verified, only written.
 
 ---
 
-### Task 0 — Provision the integration database (prerequisite)
+### Task 0 — Provision the integration database (prerequisite, runs AFTER Task 2)
 
-Tasks 4, 5, 7, 9 all have `-m integration` steps, and **the `openbrain` role
+Tasks 4, 5, 7, 9 have `-m integration` steps, and **the `openbrain` role
 cannot create a database** — `rolcreatedb` is `f` (verified). Without this
 task those steps cannot run at all.
 
-**One-time, requires sudo:**
+**Ordering:** this task is numbered 0 because it gates the integration steps,
+but it is **executed after Task 2**. `schema.sql` uses
+`CREATE TABLE IF NOT EXISTS`, which does **not** add columns to an existing
+table, so provisioning before Task 2 would leave the test database without
+`access_count`/`last_accessed_at` and every Task 5/7 integration test would
+fail against a stale schema. Task 2 therefore runs `openbrain migrate` against
+**both** databases.
+
+**One-time, requires sudo. Every command targets the 5433 cluster explicitly** —
+`sudo -u postgres createdb` with no `-h/-p` goes to the local socket on 5432,
+which is a different cluster:
 
 ```bash
-sudo -u postgres createdb -O openbrain openbrain_test
-sudo -u postgres psql -d openbrain_test -c 'CREATE EXTENSION "uuid-ossp"'
-sudo -u postgres psql -d openbrain_test -c 'CREATE EXTENSION vector'
-PGPASSWORD=... psql -h localhost -p 5433 -U openbrain -d openbrain_test \
-  -f src/db/schema.sql
+sudo -u postgres createdb -h 127.0.0.1 -p 5433 -O openbrain openbrain_test
+sudo -u postgres psql -h 127.0.0.1 -p 5433 -d openbrain_test \
+  -c 'CREATE EXTENSION "uuid-ossp"' -c 'CREATE EXTENSION vector'
+# operator's own shell, one-off provisioning - not application code, so the
+# DatabaseConfig-only rule does not apply here:
+PGPASSWORD="$(read -rsp 'openbrain password: ' p; echo "$p")" \
+  psql -h 127.0.0.1 -p 5433 -U openbrain -d openbrain_test -f src/db/schema.sql
+DB_NAME=openbrain_test .venv/bin/openbrain migrate
 ```
 
-- [ ] **0.1** Provision as above.
+- [ ] **0.1** Provision as above, then confirm
+      `psql ... -d openbrain_test -c '\d memory'` shows both new columns.
 - [ ] **0.2** Add the `integration` fixture in `tests/conftest.py`: reset
       `DatabaseConfig._instance` **and** the global pool, point `DB_NAME` at
       `openbrain_test`, then assert `SELECT current_database()` on the live
       connection. Setting the env var proves nothing while a singleton and a
       pool are already bound elsewhere.
-- [ ] **0.3** The fixture **skips with a clear message** if the database is
-      absent, and **fails** if `current_database()` returns the production
-      name. Never silently pass.
+- [ ] **0.3** The fixture **fails** — never skips — when `-m integration` was
+      explicitly requested and the database is absent, and fails if
+      `current_database()` returns the production name. A silent skip would
+      let the SQL-validity verification be bypassed, which is the one thing
+      mocked tests cannot cover.
 - [ ] **0.4** Commit: `test: provision an isolated integration database`
 
 ---
@@ -123,7 +139,10 @@ identity and retag refuses to run until the next nightly.
 - [ ] **2.8** **Full suite green first**, then run `openbrain migrate` against
       the live database, then **`openbrain backup` and confirm it still
       verifies** (columns must not alter the 19-entry TOC). Migrating before
-      the suite passes mutates the schema on unverified code.
+      the suite passes mutates the schema on unverified code. **Then migrate
+      `openbrain_test` too** (`DB_NAME=openbrain_test openbrain migrate`) once
+      Task 0 has provisioned it — otherwise the integration tests run against
+      a schema without the columns they exercise.
 - [ ] **2.9** Commit: `feat(db): add access columns with validated migration`
 
 ---
@@ -131,7 +150,8 @@ identity and retag refuses to run until the next nightly.
 ### Task 3 — Ranking configuration
 
 **Files:** create `src/config/ranking.py`, `tests/test_ranking_config.py`;
-modify `config/settings.yaml`
+modify `config/settings.yaml`, `src/main.py`, `src/api/main.py`,
+`src/cli/__init__.py`
 
 - [ ] **3.1** Failing tests for the spec's config table: defaults when the
       block is absent; per-field env override; **`w_rec+w_imp+w_acc > 0.10`
@@ -162,10 +182,13 @@ The core fix. No data mutation; revertible by deploying the previous commit.
       `ESCAPE '\'`; an empty tsquery disables the **whole** lexical arm
       including ILIKE; every `DESC` carries `NULLS LAST`; `ROW_NUMBER`
       orderings end `, id`; the caller `LIMIT` appears exactly once and last.
-- [ ] **4.2** Rewrite the hybrid branch to the spec's mandatory order: arms →
-      full outer join → rrf → `rel_norm` over the full union → blending →
-      order → `LIMIT :candidate_n`. **The current code applies the caller's
-      LIMIT inside the `rrf` CTE; that is the bug being removed.**
+- [ ] **4.2** Rewrite the branches to the spec's structural order: arms →
+      full outer join → `rrf` → order by `rrf` → `LIMIT :candidate_n`.
+      **The current code applies the caller's LIMIT inside the `rrf` CTE;
+      that is the bug being removed.** Normalization, secondary blending and
+      promotion are **Task 5's** exclusively — this task stops at relevance
+      ordering and the final limit, so the two tasks cannot both claim to
+      introduce blending.
 - [ ] **4.3** `candidate_n = limit` and SQL truncates — **the widening path
       is deliberately not built here.** Widening `candidate_n` without an
       application-side reranker and truncation (Task 10) would let a valid
@@ -241,8 +264,8 @@ modify `tests/test_retrieval.py`
 
 ### Task 7 — Access tracking
 
-**Files:** modify `src/main.py`, `src/cli/__init__.py`; create
-`src/cli/get.py`, `tests/test_access_tracking.py`
+**Files:** modify `src/main.py`, `src/cli/__init__.py`, `src/db/queries.py`;
+create `src/cli/get.py`, `tests/test_access_tracking.py`
 
 - [ ] **7.1** Failing tests: `memory_get` increments; **`memory_search` does
       not**; REST `GET /memories/{id}` does not; a failing update is swallowed
@@ -268,7 +291,8 @@ modify `tests/test_retrieval.py`
 ### Task 8 — Tagger corrections
 
 **Files:** modify `src/extractors/entities.py`, `src/extractors/tagger.py`,
-`config/settings.yaml`; create `tests/test_tagger_guards.py`
+`config/settings.yaml`, `src/setup/__init__.py`; create
+`tests/test_tagger_guards.py`
 
 - [ ] **8.1** Failing tests from the spec's two tables: every sufficient alias
       emits without the bare token; every qualified context requires both;
@@ -290,8 +314,13 @@ modify `tests/test_retrieval.py`
       MCP clients — `TagConfig` and the tagger are process singletons, so a
       live process would re-add `auto` while the backfill removes it.
       `openbrain-web` needs no restart; it does not run the Python tagger.
-      Verify readiness and that a freshly stored memory gets no `auto` tag
-      **before** starting Task 9.
+      Verify readiness, then confirm a freshly stored memory gets no `auto`
+      tag **against `openbrain_test`, not production** — the check would
+      otherwise leave an unexplained test memory in the corpus with no
+      cleanup. Restarting every MCP client is an explicit **blocking operator
+      action**: one restarted API process proves nothing about a stale MCP
+      server still holding the old singleton, and any such process will
+      re-add `auto` during the backfill.
 
 ---
 
@@ -347,16 +376,21 @@ committing the code that performs it.
 - [ ] **9-OPS.4** Real run.
 - [ ] **9-OPS.5** Verify recoverability *mechanically*, not by eyeballing:
       run `openbrain retag --undo FILE --dry-run`, confirm every mutated row
-      has an applied marker and none is reported indeterminate, and compare
-      the undo records' `before_tags` against the live rows to confirm every
-      `user`-provenance tag survived. "Undo file readable" proves nothing.
+      has an applied marker and none is reported indeterminate. Then verify
+      protected tags **through provenance, not tag names**: for each undo
+      record, read `before_tag_sources`, take every tag whose provenance is
+      `user` or missing/unknown, and assert it is still present in the live
+      row **and still carries protected provenance**. Comparing `before_tags`
+      alone cannot tell a protected tag from a removable automatic one, so it
+      would pass even if the backfill had stripped exactly what it must keep.
+      "Undo file readable" proves nothing.
 
 ---
 
 ### Task 10 — Reranker seam (disabled)
 
 **Files:** create `src/rerank/__init__.py`, `tests/test_rerank.py`; modify
-`src/db/queries.py` call path
+`src/db/queries.py` call path, `src/cli/search.py` (rerank explain fields)
 
 - [ ] **10.1** Failing tests: bypassed when the query has no text; ordering by
       `relevance_score DESC, original_sql_index ASC` (array order not
@@ -411,8 +445,12 @@ the only one that rewrites existing rows, and it carries the undo file.
 
 | After | Must hold |
 | --- | --- |
-| Task 2 | `openbrain backup` still verifies (TOC unchanged) |
-| Task 4 | Full suite green; a real search returns sensible results |
-| Task 8 | Services restarted before any backfill |
-| Task 9 | `--dry-run` counts reviewed; fresh verified backup; undo file readable |
-| Task 11 | Every documented command actually executed |
+| Every code task | Full suite green **before** commit — 123 passed baseline plus that task's new tests |
+| Task 2 | `openbrain backup` still verifies (TOC unchanged); both databases migrated |
+| Task 0 | `\d memory` on `openbrain_test` shows both columns; fixture fails, not skips, when the database is missing |
+| Task 4 | All four branches valid SQL; fixed probe queries match recorded ids and order |
+| Task 5 | A row outside the pre-blend limit is demonstrably promoted |
+| Task 8 | `auto` unreachable from settings, generated config, and `TagConfig` default; API restarted; **every MCP client restarted**; no-`auto` check run against `openbrain_test` |
+| Task 9 | Implementation committed **before** any live run |
+| Task 9-OPS | Verified backup carrying database identity; dry-run counts reviewed; after the run, every mutated row has an applied marker, none indeterminate, and every `user`/unknown-provenance tag from `before_tag_sources` is still present with protected provenance |
+| Task 11 | Every documented command executed; destructive examples only against `openbrain_test` |
