@@ -139,6 +139,30 @@ def insert_memory(
     return memory_id
 
 
+def _like_pattern(query: str) -> str:
+    """Build an ILIKE pattern with metacharacters escaped.
+
+    Unescaped, a query of '%' is a match-all pattern and '_' matches any
+    character. The backslash must be escaped first or it would double-escape
+    the escapes added after it.
+    """
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+# plainto_tsquery stems and drops stopwords, then ANDs what remains - so one
+# unmatched word returns nothing, which is why the lexical arm contributes
+# nothing to natural-language queries. Relaxing the conjunction keeps all of
+# PostgreSQL's normalisation and makes the arm actually fire. The value stays
+# a bound parameter; the cast happens server-side on an already-normalised
+# tsquery, so no injection surface is introduced.
+_TSQUERY_EXPR = "replace(plainto_tsquery('english', %s)::text, ' & ', ' | ')::tsquery"
+
+MEMORY_COLUMNS = """m.id, m.source, m.source_id, m.content, m.raw_content,
+                   m.entities, m.tags, m.tag_sources, m.importance, m.created_at,
+                   m.original_date, m.language, m.metadata"""
+
+
 def search_memories(
     query: str,
     embedding: Optional[List[float]] = None,
@@ -152,13 +176,21 @@ def search_memories(
     importance_max: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Hybrid search: combines full-text search (PostgreSQL tsvector + ILIKE)
-    with semantic vector search (pgvector), ranked by Reciprocal Rank Fusion.
+    Hybrid search: PostgreSQL full-text OR-of-lexemes fused with pgvector
+    similarity by Reciprocal Rank Fusion, then ordered.
 
-    RRF score = 1/(k_fts + rank_fts) + 1/(k_vec + rank_vector).
-    Falls back to text-only or vector-only when one signal is unavailable.
+    Both arms use k=60. Earlier code used k=1 for text and k=60 for vector,
+    which capped the best semantic match at 0.0164 - below the twentieth-best
+    lexical match at 0.0476 - so vector similarity could never promote a row,
+    only break ties among rows the keyword arm had already found.
+
+    The caller's LIMIT is applied exactly once, after ordering. Applying it
+    inside the fusion CTE (as earlier code did) means nothing downstream can
+    promote a candidate from the wider pool.
     """
-    # Build shared filter conditions
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError(f"limit must be an integer >= 1, got {limit!r}")
+
     filters = []
     filter_params = []
 
@@ -191,121 +223,87 @@ def search_memories(
     if has_vector:
         embedding = _validate_embedding(embedding)
 
-    # Candidate pool: fetch more than limit so RRF has enough to merge
     pool = max(limit * 4, 20)
 
-    # --- Hybrid search: both text and vector available ---
     if has_text and has_vector:
-        # Candidate CTEs rank inner rows, then the outer select orders by the
-        # generated rank before applying LIMIT — without this the planner may
-        # pick arbitrary rows. k=1 for text vs k=60 for vector biases toward
-        # keyword matches when both signals fire.
         query_sql = f"""
-            WITH fts_ranked AS (
-                SELECT id,
-                    ROW_NUMBER() OVER (ORDER BY
-                        ts_rank(to_tsvector('english', content), plainto_tsquery('english', %s)) DESC,
-                        CASE WHEN content ILIKE %s THEN 0 ELSE 1 END,
-                        importance DESC
-                    ) AS rank_fts
-                FROM memory
-                WHERE ({filter_clause})
-                    AND (
-                        to_tsvector('english', content) @@ plainto_tsquery('english', %s)
-                        OR content ILIKE %s
-                    )
-            ),
+            WITH tsq AS (SELECT {_TSQUERY_EXPR} AS q),
             fts AS (
-                SELECT id, rank_fts FROM fts_ranked
+                SELECT m.id,
+                    ROW_NUMBER() OVER (
+                        ORDER BY ts_rank_cd(to_tsvector('english', m.content), tsq.q) DESC,
+                                 m.id
+                    ) AS rank_fts
+                FROM memory m, tsq
+                WHERE ({filter_clause})
+                  AND tsq.q != ''::tsquery
+                  AND (to_tsvector('english', m.content) @@ tsq.q
+                       OR m.content ILIKE %s ESCAPE '\\')
                 ORDER BY rank_fts
                 LIMIT %s
             ),
-            vec_ranked AS (
-                SELECT id,
-                    ROW_NUMBER() OVER (ORDER BY embedding <=> %s::vector) AS rank_vec
-                FROM memory
-                WHERE ({filter_clause}) AND embedding IS NOT NULL
-            ),
             vec AS (
-                SELECT id, rank_vec FROM vec_ranked
+                SELECT m.id,
+                    ROW_NUMBER() OVER (ORDER BY m.embedding <=> %s::vector, m.id) AS rank_vec
+                FROM memory m
+                WHERE ({filter_clause}) AND m.embedding IS NOT NULL
                 ORDER BY rank_vec
                 LIMIT %s
             ),
-            rrf AS (
+            fused AS (
                 SELECT COALESCE(fts.id, vec.id) AS id,
-                    COALESCE(1.0 / (1 + fts.rank_fts), 0) +
-                    COALESCE(1.0 / (60 + vec.rank_vec), 0) AS score
-                FROM fts
-                FULL OUTER JOIN vec ON fts.id = vec.id
-                ORDER BY score DESC
-                LIMIT %s
+                       COALESCE(1.0 / (60 + fts.rank_fts), 0) +
+                       COALESCE(1.0 / (60 + vec.rank_vec), 0) AS rel_raw
+                FROM fts FULL OUTER JOIN vec ON fts.id = vec.id
             )
-            SELECT m.id, m.source, m.source_id, m.content, m.raw_content,
-                   m.entities, m.tags, m.tag_sources, m.importance, m.created_at,
-                   m.original_date, m.language, m.metadata,
-                   rrf.score
-            FROM rrf
-            JOIN memory m ON m.id = rrf.id
-            ORDER BY rrf.score DESC
+            SELECT {MEMORY_COLUMNS}, fused.rel_raw AS score
+            FROM fused JOIN memory m ON m.id = fused.id
+            ORDER BY fused.rel_raw DESC NULLS LAST,
+                     m.created_at DESC NULLS LAST, m.id
+            LIMIT %s
         """
-        like_pattern = f"%{query}%"
+        like = _like_pattern(query)
         params_final = (
-            [query, like_pattern] + filter_params + [query, like_pattern, pool]
+            [query] + filter_params + [like, pool]
             + [embedding] + filter_params + [pool]
             + [limit]
         )
 
-    # --- Text-only fallback (no embedding available) ---
     elif has_text:
         query_sql = f"""
-            SELECT id, source, source_id, content, raw_content,
-                   entities, tags, tag_sources, importance, created_at,
-                   original_date, language, metadata,
-                   CASE
-                       WHEN to_tsvector('english', content) @@ plainto_tsquery('english', %s)
-                       THEN ts_rank(to_tsvector('english', content), plainto_tsquery('english', %s)) + 1.0
-                       WHEN content ILIKE %s THEN 0.5
-                       ELSE 0.0
-                   END AS score
-            FROM memory
+            WITH tsq AS (SELECT {_TSQUERY_EXPR} AS q)
+            SELECT {MEMORY_COLUMNS},
+                   ts_rank_cd(to_tsvector('english', m.content), tsq.q) AS score
+            FROM memory m, tsq
             WHERE ({filter_clause})
-                AND (
-                    to_tsvector('english', content) @@ plainto_tsquery('english', %s)
-                    OR content ILIKE %s
-                )
-            ORDER BY score DESC, importance DESC, created_at DESC
+              AND tsq.q != ''::tsquery
+              AND (to_tsvector('english', m.content) @@ tsq.q
+                   OR m.content ILIKE %s ESCAPE '\\')
+            ORDER BY score DESC NULLS LAST,
+                     m.importance DESC NULLS LAST,
+                     m.created_at DESC NULLS LAST, m.id
             LIMIT %s
         """
-        like_pattern = f"%{query}%"
-        params_final = (
-            [query, query, like_pattern] + filter_params
-            + [query, like_pattern, limit]
-        )
+        params_final = [query] + filter_params + [_like_pattern(query), limit]
 
-    # --- Vector-only fallback (no text query) ---
     elif has_vector:
         query_sql = f"""
-            SELECT id, source, source_id, content, raw_content,
-                   entities, tags, tag_sources, importance, created_at,
-                   original_date, language, metadata,
-                   1.0 - (embedding <=> %s::vector) AS score
-            FROM memory
-            WHERE ({filter_clause}) AND embedding IS NOT NULL
-            ORDER BY embedding <=> %s::vector
+            SELECT {MEMORY_COLUMNS},
+                   1.0 - (m.embedding <=> %s::vector) AS score
+            FROM memory m
+            WHERE ({filter_clause}) AND m.embedding IS NOT NULL
+            ORDER BY m.embedding <=> %s::vector, m.id
             LIMIT %s
         """
         params_final = [embedding] + filter_params + [embedding, limit]
 
-    # --- No search signals, return recent ---
     else:
         query_sql = f"""
-            SELECT id, source, source_id, content, raw_content,
-                   entities, tags, tag_sources, importance, created_at,
-                   original_date, language, metadata,
-                   importance AS score
-            FROM memory
-            WHERE {filter_clause}
-            ORDER BY importance DESC, created_at DESC
+            SELECT {MEMORY_COLUMNS}, m.importance AS score
+            FROM memory m
+            WHERE ({filter_clause})
+            ORDER BY m.importance DESC NULLS LAST,
+                     m.created_at DESC NULLS LAST, m.id
             LIMIT %s
         """
         params_final = filter_params + [limit]
@@ -317,7 +315,7 @@ def search_memories(
     memories = []
     for row in results:
         mem = _decode_memory_row(row)
-        mem['score'] = float(row.get('score', 0))
+        mem['score'] = float(row.get('score') or 0)
         memories.append(mem)
 
     return memories

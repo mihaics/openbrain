@@ -153,6 +153,7 @@ class SearchRequest(BaseModel):
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     importance_min: Optional[float] = None
+    importance_max: Optional[float] = None
 
 
 # Routes
@@ -367,11 +368,13 @@ async def search_memories_endpoint(search: SearchRequest):
         sources=sources,
         tags=tags,
         date_from=date_from,
-        date_to=date_to
+        date_to=date_to,
+        # Filters must reach SQL. Post-filtering an already-limited list
+        # returns a short page while qualifying rows sit just below the
+        # LIMIT the query already paid for.
+        importance_min=search.importance_min,
+        importance_max=search.importance_max,
     )
-
-    if search.importance_min is not None:
-        results = [m for m in results if m.get("importance", 0) >= search.importance_min]
 
     return [MemoryResponse.from_memory(m) for m in results]
 
