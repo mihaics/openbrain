@@ -9,14 +9,8 @@ Type=oneshot
 WorkingDirectory=/home/mihai/tools/open-brain
 Environment=PYTHONPATH=/home/mihai/tools/open-brain
 ExecStart=/home/mihai/tools/open-brain/.venv/bin/openbrain backup
-
-# Log to a file, not the journal. Verified on this machine: journald is
-# running on the runtime journal only (/run/log/journal), /var/log/journal
-# has not been written since 2026-01-28, and no user journal is live - so
-# `journalctl --user -u openbrain-backup` returns nothing and a failing
-# nightly run would leave no trace at all. StateDirectory makes systemd
-# create the directory before the unit starts, so this cannot fail on a
-# machine where ~/backups does not exist yet.
-StateDirectory=openbrain
-StandardOutput=append:%S/openbrain/backup.log
-StandardError=append:%S/openbrain/backup.log
+# Output goes wherever journald puts it, which on this laptop is volatile
+# and often nothing at all. That is fine and deliberate: `openbrain backup
+# --status` is the health signal, and it reads the manifests on disk rather
+# than any log - including last_failure, with the archive name, time, and
+# reason a failed run recorded.
