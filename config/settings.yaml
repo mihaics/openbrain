@@ -50,6 +50,23 @@ ranking:
     top_n: 50
     timeout_seconds: 5
 
+capture:
+  # Auto-capture is opt-in twice: globally, and per project.
+  enabled: false
+  projects: []
+  model: qwen3:4b
+  model_digest: ""
+  prompt_version: "1"
+  ollama_url: http://127.0.0.1:11434
+  num_ctx: 16384
+  timeout_seconds: 120
+  max_facts_per_boundary: 3
+  max_fact_chars: 1000
+  max_input_tokens: 12000
+  max_sessions_per_drain: 20
+  daily_ceiling: 30
+  dedup_threshold: 0.92
+
 analytics:
   trend_weeks: 4
   weekly_report_day: 6

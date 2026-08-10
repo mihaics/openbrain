@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Claude Code Stop hook: record that a session has new turns. Nothing else.
+
+This runs on the path of every assistant turn, so it does almost nothing and
+it never fails visibly:
+
+  - stdlib only. No `src` imports, no PyYAML, no database, no model, no
+    network. It reads a small JSON artifact the CLI writes for it.
+  - always exits 0 and writes nothing to stdout or stderr. A non-zero Stop
+    hook surfaces as an error in the user's session, and exit code 2 feeds
+    stderr back to the model. Nothing this feature does is worth either.
+  - every exception is suppressed. A capture that silently does not happen is
+    strictly better than a broken editing session.
+"""
+import json
+import os
+import re
+import sys
+import time
+import uuid as uuid_mod
+
+MAX_STDIN_BYTES = 256 * 1024
+UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+CONFIG_PATH = os.path.join(
+    os.path.expanduser("~"), ".local", "state", "openbrain", "capture-hook.json"
+)
+
+
+def _atomic_write(path, payload):
+    tmp = f"{path}.tmp.{os.getpid()}.{uuid_mod.uuid4().hex[:8]}"
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(payload))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        dir_fd = os.open(os.path.dirname(path), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main():
+    raw = sys.stdin.read(MAX_STDIN_BYTES)
+    event = json.loads(raw)
+
+    # Already continuing because of a previous Stop hook: enqueueing again
+    # would just add churn.
+    if event.get("stop_hook_active"):
+        return
+
+    session_id = event.get("session_id") or ""
+    transcript = event.get("transcript_path") or ""
+    cwd = event.get("cwd") or ""
+    if not UUID_RE.match(session_id) or not transcript:
+        return
+
+    with open(CONFIG_PATH) as f:
+        config = json.load(f)
+
+    if not config.get("enabled"):
+        return
+
+    # Opt-in per project, matched on the resolved absolute path. An empty
+    # allowlist allows nothing.
+    resolved_cwd = os.path.realpath(cwd) if cwd else ""
+    if resolved_cwd not in (config.get("projects") or []):
+        return
+
+    roots = config.get("transcript_roots") or []
+    resolved = os.path.realpath(transcript)
+    if not any(resolved.startswith(os.path.realpath(r) + os.sep) for r in roots):
+        return
+
+    queue_root = config["queue_root"]
+    os.makedirs(queue_root, mode=0o700, exist_ok=True)
+    _atomic_write(os.path.join(queue_root, session_id + ".json"), {
+        "session_id": session_id,
+        "transcript_path": resolved,
+        "cwd": resolved_cwd,
+        "enqueued_at": time.time(),
+    })
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException:
+        # Deliberately bare: the hook must never surface anything to the user
+        # or the model, whatever went wrong.
+        pass
+    sys.exit(0)

@@ -144,6 +144,33 @@ def main():
     retag_parser.add_argument('--force', action='store_true',
                               help='Override identity/schema checks on --undo')
 
+    capture_parser = subparsers.add_parser(
+        'capture', help='Auto-capture durable facts from Claude Code sessions'
+    )
+    capture_parser.add_argument('--drain', action='store_true',
+                                help='Process queued sessions (default)')
+    capture_parser.add_argument('--dry-run', action='store_true',
+                                help='Report candidates, write nothing')
+    capture_parser.add_argument('--scan-recent', metavar='N',
+                                help='Extract from the N most recent transcripts '
+                                     'without queueing or writing')
+    capture_parser.add_argument('--status', action='store_true',
+                                help='Report capture state')
+    capture_parser.add_argument('--json', action='store_true',
+                                help='Machine-readable status')
+    capture_parser.add_argument('--init-state', action='store_true',
+                                help='Initialize the generation checkpoint')
+    capture_parser.add_argument('--reconcile', action='store_true',
+                                help='Rebuild progress after a database restore')
+    capture_parser.add_argument('--sync-hook-config', action='store_true',
+                                help='Write the JSON artifact the Stop hook reads')
+    capture_parser.add_argument('--install-hook', metavar='SETTINGS',
+                                help='Add the Stop hook to a settings.json')
+    capture_parser.add_argument('--uninstall-hook', metavar='SETTINGS',
+                                help='Remove the Stop hook from a settings.json')
+    capture_parser.add_argument('--force', action='store_true',
+                                help='Override init-state cleanliness checks')
+
     subparsers.add_parser(
         'migrate', help='Apply additive schema changes (idempotent)'
     )
@@ -194,6 +221,12 @@ def main():
         elif args.command == 'retag':
             from .retag import retag_cmd
             return retag_cmd(args)
+        elif args.command == 'capture':
+            from .capture import capture_cmd
+            from .hookinstall import install_cmd
+            if args.install_hook or args.uninstall_hook:
+                return install_cmd(args)
+            return capture_cmd(args)
         elif args.command == 'migrate':
             from .migrate import migrate_cmd
             return migrate_cmd(args)

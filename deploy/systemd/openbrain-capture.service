@@ -1,0 +1,13 @@
+[Unit]
+Description=Open Brain auto-capture drain
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/mihai/tools/open-brain
+Environment=PYTHONPATH=/home/mihai/tools/open-brain
+ExecStart=/home/mihai/tools/open-brain/.venv/bin/openbrain capture --drain
+# Extraction runs a local model beside active development, so it yields.
+# Note this bounds the worker, not the separately running Ollama daemon.
+Nice=10
+MemoryMax=2G
+TimeoutStartSec=900
