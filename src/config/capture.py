@@ -88,10 +88,26 @@ class CaptureConfig:
                                           "dedup_threshold")
         self.min_exchange_chars = _as_number(block.get("min_exchange_chars", 200),
                                              "min_exchange_chars", integer=True)
+        # All persona roots, explicitly. A missing root is visible below
+        # rather than a silent omission: searching a subset of personas and
+        # reporting confident misses is worse than refusing.
+        default_roots = {
+            "claude": str(Path.home() / ".claude" / "projects"),
+            "pactos": str(Path.home() / ".claude-pactos" / "projects"),
+            "quarticle": str(Path.home() / ".claude-quarticle" / "projects"),
+        }
+        configured = block.get("transcript_roots")
+        if isinstance(configured, dict):
+            self.persona_roots = {k: str(Path(v).expanduser())
+                                  for k, v in configured.items()}
+        elif configured:
+            self.persona_roots = {Path(p).parent.name.lstrip("."): str(Path(p).expanduser())
+                                  for p in configured}
+        else:
+            self.persona_roots = default_roots
         self.transcript_roots: List[str] = [
-            str(Path(p).expanduser().resolve())
-            for p in (block.get("transcript_roots")
-                      or [str(Path.home() / ".claude" / "projects")])
+            str(Path(v).expanduser().resolve())
+            for v in self.persona_roots.values() if Path(v).expanduser().exists()
         ]
         self._validate()
 

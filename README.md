@@ -262,6 +262,37 @@ clobbered. `--undo` is exempt from the backup gate, because it must work in
 exactly the emergency where the backup is stale.
 
 
+## Transcript Search
+
+`transcript_search` finds **which conversation** discussed something, over the
+Claude Code transcripts on disk. It reads files directly and never touches the
+database, so it works when PostgreSQL is down — which is often exactly when
+you want it.
+
+```json
+{"name": "transcript_search",
+ "arguments": {"query": "catastrophic backtracking", "limit": 10}}
+```
+
+**Literal substring, case-insensitive. No regex and no semantic matching** —
+unlike `memory_search`. Regex is deliberately absent: Python's engine can
+backtrack catastrophically and no deadline can interrupt it, which would wedge
+the MCP server.
+
+Nothing is indexed and nothing is stored: 461 transcripts across three
+personas parse in well under a second, so an index would cost storage and
+staleness to save time nobody can perceive. Transcripts never enter `memory` —
+raw conversation would drown the curated memories in their own results.
+
+Matches carry `persona`, `project` (from the record's `cwd`, not the encoded
+directory name), `kind` (`session` or `subagent`), `session_id`, `agent_id`,
+timestamp and a redacted snippet. Incomplete scans always say so via
+`truncated` and `truncation_reasons`, with a `next_cursor` to continue.
+
+**Snippets leave the machine.** They enter the calling agent's context, which
+may be a cloud model, so redaction is a disclosure boundary rather than a
+local nicety — and it is pattern-based, therefore incomplete.
+
 ## Auto-Capture
 
 A Claude Code `Stop` hook records that a session has new turns; a timer drains

@@ -58,6 +58,27 @@ class Boundary:
         }
 
 
+def decode_record(record: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Reduce one transcript record to (role, text), or None if it is not
+    conversation.
+
+    Shared by incremental capture reading and whole-file search so the
+    filtering rule - human and assistant text only, never tool_result,
+    tool_use, thinking, meta or sidechain - lives in exactly one place. The
+    readers differ: capture reads incrementally to a boundary, search streams
+    whole files, and search must not inherit capture's "stop at the first
+    malformed record" behaviour.
+    """
+    if record.get("type") not in ("user", "assistant"):
+        return None
+    if record.get("isMeta") or record.get("isSidechain"):
+        return None
+    text = _block_text((record.get("message") or {}).get("content"))
+    if not text:
+        return None
+    return record["type"], text
+
+
 def _block_text(content: Any) -> str:
     """Pull human/assistant prose out of a message body."""
     if isinstance(content, str):

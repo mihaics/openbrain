@@ -317,6 +317,38 @@ def _serialize_memories(
 
 
 TOOLS: List[Tool] = [
+    Tool(
+        name="transcript_search",
+        description=(
+            "Search Claude Code session transcripts on disk for a literal "
+            "substring. Finds WHICH conversation discussed something; it does "
+            "not return whole sessions. Case-insensitive substring only - "
+            "there is no regex and no semantic matching, unlike memory_search. "
+            "Transcripts are never stored in memory; this reads files directly, "
+            "so it works even when the database is down. Snippets are redacted "
+            "for credential-shaped and high-entropy strings."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "Literal substring to find."},
+                "limit": {"type": "integer", "default": 20, "minimum": 1,
+                          "maximum": 100},
+                "project": {"type": "string",
+                            "description": "Filter by the session's cwd."},
+                "persona": {"type": "string",
+                            "description": "claude, pactos or quarticle."},
+                "since": {"type": "string",
+                          "description": "ISO timestamp; filters records."},
+                "include_subagents": {"type": "boolean", "default": True},
+                "cursor": {"type": "string",
+                           "description": "next_cursor from a previous call."},
+            },
+            "required": ["query"],
+        },
+        annotations=_read_only(),
+    ),
         Tool(
             name="memory_search",
             description=(
@@ -653,6 +685,13 @@ async def list_tools() -> List[Tool]:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> List[TextContent]:
+    # Dispatched before the database gate: transcript search reads files and
+    # touches no database, and it is most wanted precisely when something is
+    # broken enough that PostgreSQL is down.
+    if name == "transcript_search":
+        return await handle_transcript_search(
+            arguments if isinstance(arguments, dict) else {})
+
     if not _DB_READY:
         return _json({"error": "Database not initialized; check server logs."})
 
@@ -801,6 +840,33 @@ async def handle_memory_store(args: Dict) -> List[TextContent]:
         "entities": entities,
         "embedded": embedded,
     })
+
+
+async def handle_transcript_search(args: Dict) -> List[TextContent]:
+    """Search Claude Code transcripts on disk. Reads nothing from the database."""
+    import asyncio as _asyncio
+    from pathlib import Path as _Path
+
+    from capture.search import search as _search
+    from config.capture import CaptureConfig as _CaptureConfig
+
+    query = args.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query must be a non-empty string")
+
+    cfg = _CaptureConfig.get_instance()
+    roots = {k: _Path(v) for k, v in cfg.persona_roots.items()}
+
+    result = await _asyncio.to_thread(
+        _search, query, roots,
+        limit=_clamp(args.get("limit", 20), 1, 100, 20),
+        project=args.get("project"),
+        persona=args.get("persona"),
+        since=args.get("since"),
+        include_subagents=bool(args.get("include_subagents", True)),
+        cursor=args.get("cursor"),
+    )
+    return _json(result.as_dict())
 
 
 async def handle_memory_get(args: Dict) -> List[TextContent]:
