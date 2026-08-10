@@ -1,4 +1,4 @@
-# OpenBrain Retrieval Quality — Implementation Plan (revision 5)
+# OpenBrain Retrieval Quality — Implementation Plan (revision 6)
 
 **Source spec:** `docs/superpowers/specs/2026-08-10-retrieval-quality-design.md`
 (**revision 9**, passed adversarial review). The spec owns every design
@@ -119,7 +119,10 @@ identity and retag refuses to run until the next nightly.
       `.retag-sequence` and undo paths from the same root. Without this, any
       test-database backfill would read production manifests — failing
       identity validation — and would write its lock, sequence and undo files
-      into the production retag namespace. Tested.
+      into the production retag namespace. **Scope of this task's test:** the
+      backup-root resolver only — `src/cli/retag.py` does not exist until
+      Task 9, so nothing here can verify the lock, sequence or undo paths.
+      Task 9 owns asserting those actually derive from the override.
 - [ ] **1.4** Full suite green; run `openbrain backup` for real and confirm
       the new dump's `.json` contains the field and still verifies.
 - [ ] **1.5** Commit: `feat(backup): record database identity in the manifest`
