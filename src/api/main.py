@@ -14,9 +14,15 @@ from pydantic import BaseModel
 
 # Add src to path
 import sys
+import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from db.connection import get_vector_dim, init_db
+from db.connection import (
+    SchemaMismatchError,
+    get_vector_dim,
+    init_db,
+    validate_schema,
+)
 from db.queries import (
     search_memories,
     get_memory_by_id,
@@ -40,12 +46,48 @@ from analytics.trends import TrendAnalyzer
 from analytics.weekly_report import generate_weekly_report
 
 
+_SCHEMA_STATE = {"ready": True, "reason": None, "checked_at": 0.0}
+_RECHECK_SECONDS = 10
+
+
+def _mark_not_ready(reason: str) -> None:
+    _SCHEMA_STATE.update(ready=False, reason=reason, checked_at=time.monotonic())
+
+
+def require_schema() -> None:
+    """Readiness guard for every database-backed endpoint.
+
+    An exception escaping the lifespan would leave no server to answer, so a
+    schema mismatch cannot simply propagate here as it does in the MCP server.
+    Instead the app records not-ready and refuses database work with 503.
+
+    The recheck lives here rather than in /health so that ordinary traffic
+    recovers: after `openbrain migrate` the next blocked request revalidates
+    and clears the state, with no restart and no dependence on anyone polling
+    a health endpoint.
+    """
+    if _SCHEMA_STATE["ready"]:
+        return
+    if time.monotonic() - _SCHEMA_STATE["checked_at"] >= _RECHECK_SECONDS:
+        try:
+            validate_schema()
+            _SCHEMA_STATE.update(ready=True, reason=None)
+            return
+        except SchemaMismatchError as e:
+            _mark_not_ready(str(e))
+    raise HTTPException(status_code=503, detail=_SCHEMA_STATE["reason"])
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager."""
     # Startup
     try:
         init_db()
+        validate_schema()
+    except SchemaMismatchError as e:
+        _mark_not_ready(str(e))
+        print(f"NOT READY: {e}", file=sys.stderr)
     except Exception as e:
         print(f"Warning: Could not initialize database: {e}")
     yield

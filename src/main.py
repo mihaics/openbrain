@@ -19,7 +19,7 @@ from mcp.types import Tool, TextContent, ToolAnnotations
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from db import connection
-from db.connection import get_vector_dim
+from db.connection import SchemaMismatchError, get_vector_dim
 from db.queries import (
     insert_memory,
     search_memories,
@@ -132,6 +132,11 @@ def init_server() -> None:
         connection.init_db()
         _DB_READY = True
         print("Database connection initialized", file=sys.stderr)
+    except SchemaMismatchError:
+        # Deliberately not swallowed. Every other startup failure degrades to
+        # _DB_READY=False and keeps serving, which for a schema mismatch would
+        # mean answering requests against a database this code cannot use.
+        raise
     except Exception as e:
         print(f"ERROR: Database initialization failed: {e}", file=sys.stderr)
         return

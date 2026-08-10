@@ -121,6 +121,10 @@ def main():
     backup_parser.add_argument('--json', action='store_true',
                                help='Machine-readable output (--status only)')
 
+    subparsers.add_parser(
+        'migrate', help='Apply additive schema changes (idempotent)'
+    )
+
     args = parser.parse_args()
     
     if not args.command:
@@ -155,6 +159,9 @@ def main():
         elif args.command == 'backup':
             from .backup import backup_cmd
             return backup_cmd(args)
+        elif args.command == 'migrate':
+            from .migrate import migrate_cmd
+            return migrate_cmd(args)
         else:
             parser.print_help()
             return 1

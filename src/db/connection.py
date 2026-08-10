@@ -191,3 +191,62 @@ def get_vector_dim() -> Optional[int]:
     except Exception:
         pass
     return None
+
+
+class SchemaMismatchError(RuntimeError):
+    """The database schema is not what this code requires.
+
+    Distinct from every other startup error on purpose: the servers catch
+    broad exceptions during initialisation and carry on in a degraded state,
+    which for a schema mismatch would mean running-but-broken rather than a
+    barrier. Callers must let this one escape.
+    """
+
+
+# name -> (data_type, is_nullable, default_contains)
+REQUIRED_COLUMNS = {
+    "access_count": ("integer", "NO", "0"),
+    "last_accessed_at": ("timestamp without time zone", "YES", None),
+}
+
+
+def validate_schema() -> None:
+    """Verify the access-tracking columns exist AND are correctly defined.
+
+    Existence is not enough: ALTER TABLE ... ADD COLUMN IF NOT EXISTS silently
+    does nothing when a column of the wrong type, nullability or default is
+    already present, so an existence-only check would pass on a schema that
+    breaks at query time.
+    """
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT column_name, data_type, is_nullable, column_default
+              FROM information_schema.columns
+             WHERE table_name = 'memory' AND column_name = ANY(%s)
+            """,
+            (list(REQUIRED_COLUMNS),),
+        )
+        found = {r["column_name"]: r for r in cursor.fetchall()}
+
+    for name, (dtype, nullable, default) in REQUIRED_COLUMNS.items():
+        row = found.get(name)
+        if row is None:
+            raise SchemaMismatchError(
+                f"memory.{name} is missing - run `openbrain migrate`"
+            )
+        if row["data_type"] != dtype:
+            raise SchemaMismatchError(
+                f"memory.{name} is {row['data_type']}, expected {dtype} - "
+                f"run `openbrain migrate` after correcting it"
+            )
+        if row["is_nullable"] != nullable:
+            expected = "nullable" if nullable == "YES" else "not nullable"
+            raise SchemaMismatchError(
+                f"memory.{name} nullability is wrong: expected {expected}"
+            )
+        if default is not None and default not in (row["column_default"] or ""):
+            raise SchemaMismatchError(
+                f"memory.{name} default is {row['column_default']!r}, "
+                f"expected one containing {default!r}"
+            )

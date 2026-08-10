@@ -20,7 +20,12 @@ CREATE TABLE IF NOT EXISTS memory (
     created_at TIMESTAMP DEFAULT NOW(),
     original_date TIMESTAMP,
     language VARCHAR(10),
-    metadata JSONB DEFAULT '{}'
+    metadata JSONB DEFAULT '{}',
+    -- Access tracking. Incremented only on an explicit fetch-by-id, never on
+    -- search: appearing in a result list is not evidence a memory was used,
+    -- and counting it would let search reinforce its own results.
+    access_count INT NOT NULL DEFAULT 0,
+    last_accessed_at TIMESTAMP
 );
 
 -- Indexes for performance
