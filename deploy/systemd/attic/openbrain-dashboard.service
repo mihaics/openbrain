@@ -1,0 +1,14 @@
+[Unit]
+Description=Open Brain Streamlit Dashboard
+After=openbrain-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mihai/tools/open-brain
+ExecStart=/home/mihai/tools/open-brain/.venv/bin/streamlit run ui/dashboard.py --server.port=8501 --server.address=127.0.0.1
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONPATH=/home/mihai/tools/open-brain
+
+[Install]
+WantedBy=default.target
