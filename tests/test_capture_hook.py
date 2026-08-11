@@ -133,6 +133,73 @@ class TestGating:
         assert len(_queue(home)) == 1
 
 
+class TestSubtreeGating:
+    """The same matrix as TestProjectAllowlist, against the real binary.
+
+    The hook is a separate stdlib-only implementation of the same predicate,
+    so testing CaptureConfig alone would not catch drift between them.
+    """
+
+    def test_descendant_of_an_allowlisted_root_is_enqueued(self, home):
+        deep = home / "work" / "repo" / "src"
+        deep.mkdir(parents=True)
+        run_hook(_payload(home, cwd=str(deep)), home)
+
+        assert len(_queue(home)) == 1
+
+    def test_parent_of_an_allowlisted_root_is_skipped(self, home):
+        run_hook(_payload(home, cwd=str(home)), home)
+        assert _queue(home) == []
+
+    def test_sibling_sharing_a_string_prefix_is_skipped(self, home):
+        lookalike = home / "work2"
+        lookalike.mkdir()
+        run_hook(_payload(home, cwd=str(lookalike)), home)
+
+        assert _queue(home) == []
+
+    def test_symlink_escaping_the_tree_is_skipped(self, home, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (home / "work" / "escape").symlink_to(outside)
+        run_hook(_payload(home, cwd=str(home / "work" / "escape")), home)
+
+        assert _queue(home) == []
+
+    def test_empty_allowlist_entry_does_not_match_the_process_cwd(self, home):
+        """`projects: ['']` must match nothing, not resolve to os.getcwd()."""
+        path = home / ".local" / "state" / "openbrain" / "capture-hook.json"
+        data = json.loads(path.read_text())
+        data["projects"] = [""]
+        path.write_text(json.dumps(data))
+
+        run_hook(_payload(home), home)
+        assert _queue(home) == []
+
+    def test_malformed_project_entry_fails_closed(self, home):
+        """CaptureConfig refuses such a config outright; the hook cannot
+        report an error, so it must capture nothing rather than press on
+        with the entries it happens to understand."""
+        path = home / ".local" / "state" / "openbrain" / "capture-hook.json"
+        data = json.loads(path.read_text())
+        data["projects"] = [str(home / "work"), 17]
+        path.write_text(json.dumps(data))
+
+        result = run_hook(_payload(home), home)
+
+        assert result.returncode == 0
+        assert _queue(home) == []
+
+    def test_tilde_in_an_entry_is_expanded(self, home):
+        path = home / ".local" / "state" / "openbrain" / "capture-hook.json"
+        data = json.loads(path.read_text())
+        data["projects"] = ["~/work"]
+        path.write_text(json.dumps(data))
+
+        run_hook(_payload(home), home)
+        assert len(_queue(home)) == 1
+
+
 class TestSpeed:
     def test_stays_well_under_a_budget(self, home):
         """It runs on every assistant turn, so slowness is a real cost."""

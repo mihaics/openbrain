@@ -206,3 +206,59 @@ class TestHookInstall:
 
         assert os.path.isfile(HOOK_COMMAND)
         assert os.access(HOOK_COMMAND, os.X_OK)
+
+
+_ENABLED = {"enabled": True, "model_digest": "deadbeefcafe0000"}
+
+
+class TestDryRunIsNonMutating:
+    """`--dry-run` is documented as "Report candidates, write nothing"."""
+
+    def _queue_entry(self, root, transcript):
+        sid = "55555555-5555-5555-5555-555555555555"
+        root.mkdir(parents=True, exist_ok=True)
+        entry = root / f"{sid}.json"
+        entry.write_text(json.dumps({
+            "session_id": sid,
+            "transcript_path": str(transcript),
+            "cwd": "/work/repo",
+            "enqueued_at": 0,
+        }))
+        return entry
+
+    def test_missing_transcript_leaves_the_entry_alone(self, tmp_path):
+        """A transcript absent for one pass - a deleted or not-yet-flushed
+        file - must not cost the queue entry in a mode that writes nothing."""
+        from src.capture.worker import drain
+        from src.config.capture import CaptureConfig
+
+        queue_root = tmp_path / "queue"
+        state_root = tmp_path / "state"
+        state_root.mkdir()
+        entry = self._queue_entry(queue_root, tmp_path / "gone.jsonl")
+
+        with patch('src.capture.extract.verify_model', return_value=(True, "")):
+            drain(CaptureConfig(config_data=_ENABLED), dry_run=True,
+                  queue_root=queue_root, state_root=state_root)
+
+        assert entry.exists(), "dry run deleted a queued entry"
+        assert not list(queue_root.glob("*.deadletter"))
+
+    def test_missing_transcript_is_dead_lettered_in_a_real_drain(self, tmp_path):
+        """The real drain still retires it; only dry run is untouched."""
+        from src.capture.worker import drain
+        from src.config.capture import CaptureConfig
+
+        queue_root = tmp_path / "queue"
+        state_root = tmp_path / "state"
+        state_root.mkdir()
+        entry = self._queue_entry(queue_root, tmp_path / "gone.jsonl")
+
+        with patch('src.capture.extract.verify_model', return_value=(True, "")), \
+             patch('src.capture.worker.check_interlock', return_value=1), \
+             patch('src.capture.store.daily_count', return_value=0):
+            drain(CaptureConfig(config_data=_ENABLED),
+                  queue_root=queue_root, state_root=state_root)
+
+        assert not entry.exists()
+        assert len(list(queue_root.glob("*.deadletter"))) == 1

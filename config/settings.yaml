@@ -51,9 +51,15 @@ ranking:
     timeout_seconds: 5
 
 capture:
-  # Auto-capture is opt-in twice: globally, and per project.
+  # Auto-capture is opt-in twice: globally, and per project. Entries are
+  # absolute paths covering their whole subtree, so one entry per work tree
+  # admits every repository under it, present and future.
   enabled: true
   projects:
+    - /home/mihai/work/quarticle
+    - /home/mihai/work/pactos
+    - /home/mihai/work/sysop
+    # Not under ~/work, so it stays listed in its own right.
     - /home/mihai/tools/open-brain
   model: qwen3:4b
   model_digest: "359d7dd4bcdab3d8"

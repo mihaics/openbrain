@@ -48,6 +48,31 @@ def _atomic_write(path, payload):
         raise
 
 
+def _allowed(resolved_cwd, projects):
+    """True when resolved_cwd is at or below an allowlist entry.
+
+    Fails closed on a malformed entry rather than skipping it and continuing:
+    CaptureConfig refuses such a configuration outright, and this hook has no
+    way to report one, so capturing nothing is the honest mirror of that.
+    """
+    if not isinstance(projects, list) or not projects:
+        return False
+
+    roots = []
+    for entry in projects:
+        if not isinstance(entry, str) or not entry.strip():
+            return False
+        root = os.path.realpath(os.path.expanduser(entry))
+        if not os.path.isabs(root):
+            return False
+        roots.append(root)
+
+    # Every entry is validated before any is matched, so one good entry cannot
+    # short-circuit past a malformed one.
+    return any(resolved_cwd == r or resolved_cwd.startswith(r.rstrip(os.sep) + os.sep)
+               for r in roots)
+
+
 def main():
     raw = sys.stdin.read(MAX_STDIN_BYTES)
     event = json.loads(raw)
@@ -69,10 +94,15 @@ def main():
     if not config.get("enabled"):
         return
 
-    # Opt-in per project, matched on the resolved absolute path. An empty
-    # allowlist allows nothing.
-    resolved_cwd = os.path.realpath(cwd) if cwd else ""
-    if resolved_cwd not in (config.get("projects") or []):
+    # Opt-in per project, matched by subtree on the resolved physical path:
+    # an entry covers itself and everything beneath it. An empty allowlist
+    # allows nothing. This mirrors CaptureConfig.matched_root; the two are
+    # separate implementations because this file cannot import src, so the
+    # shared test matrix in tests/ runs against both.
+    if not cwd:
+        return
+    resolved_cwd = os.path.realpath(os.path.expanduser(cwd))
+    if not _allowed(resolved_cwd, config.get("projects")):
         return
 
     roots = config.get("transcript_roots") or []

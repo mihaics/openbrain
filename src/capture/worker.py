@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from ..config.capture import STATE_ROOT, CaptureConfig
 from . import extract as extract_mod
 from . import store as store_mod
+from .identity import project_for
 from .progress import Interlock, Progress
 from .queue import CaptureQueue, QueueError
 from .transcript import read_exchanges, windows
@@ -53,6 +54,19 @@ def _work_identity(boundary, cfg, reprocess_generation=0) -> Dict[str, Any]:
         "model_digest": cfg.model_digest,
         "reprocess_generation": reprocess_generation,
     }
+
+
+def _project_identity(cfg: CaptureConfig, cwd: str) -> str:
+    """The repository a session belongs to, for `metadata.project`.
+
+    Under subtree matching the cwd may be any directory beneath an allowlist
+    entry, so the cwd alone would fragment one repository across several
+    project values.
+    """
+    root = cfg.matched_root(cwd)
+    if root is None:
+        return cwd or ""
+    return project_for(cwd, root)
 
 
 def check_interlock(progress: Progress) -> int:
@@ -137,7 +151,12 @@ def _drain_locked(cfg, queue, progress, report, dry_run) -> DrainReport:
 
         transcript = Path(payload["transcript_path"])
         if not transcript.exists():
-            queue.release(entry if dry_run else entry, dead_letter=not dry_run)
+            # Only a real drain retires it. Releasing in a dry run would hand
+            # release() the unclaimed entry as its own target, which takes the
+            # "newer event wins" branch and unlinks the very entry a mode
+            # documented to write nothing is only supposed to report on.
+            if not dry_run:
+                queue.release(entry, dead_letter=True)
             continue
 
         session_id = payload["session_id"]
@@ -208,7 +227,7 @@ def _drain_locked(cfg, queue, progress, report, dry_run) -> DrainReport:
         status, store_report = store_mod.store_boundary(
             facts, identity,
             {"session_id": session_id, "boundary_id": boundary.boundary_id,
-             "project": payload.get("cwd", "")},
+             "project": _project_identity(cfg, payload.get("cwd", ""))},
             cfg, generation,
         )
 

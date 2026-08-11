@@ -50,6 +50,33 @@ def _as_number(value: Any, key: str, *, integer=False):
     return out
 
 
+def _as_projects(value: Any) -> List[str]:
+    """Normalise the allowlist, refusing anything that could widen it.
+
+    A bare string is the dangerous case: iterating it yields characters, and a
+    leading '/' would become a root matching the entire filesystem.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise CaptureConfigError(
+            f"capture.projects must be a list of absolute paths, got {value!r}")
+
+    out = []
+    for entry in value:
+        if not isinstance(entry, str):
+            raise CaptureConfigError(
+                f"capture.projects entries must be strings, got {entry!r}")
+        if not entry.strip():
+            raise CaptureConfigError("capture.projects entries must not be empty")
+        expanded = Path(entry).expanduser()
+        if not expanded.is_absolute():
+            raise CaptureConfigError(
+                f"capture.projects entries must be absolute, got {entry!r}")
+        out.append(str(expanded.resolve()))
+    return out
+
+
 class CaptureConfig:
     """Settings for the hook, the worker and extraction."""
 
@@ -61,9 +88,7 @@ class CaptureConfig:
 
         self.enabled = _as_bool(_env("CAPTURE_ENABLED", block.get("enabled", False)),
                                 "enabled")
-        self.projects: List[str] = [
-            str(Path(p).expanduser().resolve()) for p in (block.get("projects") or [])
-        ]
+        self.projects: List[str] = _as_projects(block.get("projects"))
         self.model = _env("CAPTURE_MODEL", block.get("model", "qwen3:4b"))
         self.model_digest = _env("CAPTURE_MODEL_DIGEST", block.get("model_digest", ""))
         self.prompt_version = str(block.get("prompt_version", "1"))
@@ -155,13 +180,33 @@ class CaptureConfig:
             if not self.prompt_version:
                 raise CaptureConfigError("capture.prompt_version is required")
 
-    def allows_project(self, cwd: str) -> bool:
-        """Opt-in by exact resolved path. An empty allowlist allows nothing."""
+    def matched_root(self, cwd: str) -> Optional[str]:
+        """The deepest allowlist entry containing cwd, or None.
+
+        Subtree matching: entries name work trees holding many repositories,
+        and a session may start in any subdirectory of one. Comparison is on
+        the resolved physical path, so a symlink out of an allowed tree is
+        out, and it is component-aware, so `/work/quarticle2` does not match
+        the root `/work/quarticle`.
+        """
+        if not cwd or not isinstance(cwd, str):
+            return None
         try:
-            resolved = str(Path(cwd).expanduser().resolve())
+            resolved = Path(cwd).expanduser().resolve()
         except Exception:
-            return False
-        return resolved in self.projects
+            return None
+
+        best = None
+        for entry in self.projects:
+            root = Path(entry)
+            if resolved == root or resolved.is_relative_to(root):
+                if best is None or len(entry) > len(best):
+                    best = entry
+        return best
+
+    def allows_project(self, cwd: str) -> bool:
+        """Opt-in by subtree. An empty allowlist allows nothing."""
+        return self.matched_root(cwd) is not None
 
     def hook_artifact(self) -> Dict[str, Any]:
         return {

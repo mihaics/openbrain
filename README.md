@@ -308,10 +308,20 @@ openbrain capture --sync-hook-config   # after changing capture settings
 ```
 
 **Opt-in twice.** `capture.enabled` must be true *and* the session's directory
-must appear in `capture.projects`. An empty allowlist captures nothing. The
-hook reads a small JSON artifact (`~/.local/state/openbrain/capture-hook.json`)
-because it is stdlib-only and cannot parse YAML — regenerate it with
-`--sync-hook-config` after any settings change.
+must sit at or below an entry in `capture.projects`. Entries are absolute paths
+and cover their whole subtree, so one entry per work tree admits every
+repository under it, including subdirectories and future clones. Matching is on
+the resolved physical path: a symlink out of an allowed tree is not covered,
+and `/work/foo2` is not matched by the entry `/work/foo`. An empty allowlist
+captures nothing. The hook reads a small JSON artifact
+(`~/.local/state/openbrain/capture-hook.json`) because it is stdlib-only and
+cannot parse YAML — regenerate it with `--sync-hook-config` after any settings
+change.
+
+Because entries cover subtrees, they admit *every* directory beneath them, not
+only git repositories — scratch directories and vendored trees included. Each
+captured memory records the nearest enclosing repository as `metadata.project`,
+so sessions started in `repo/` and `repo/src` share one project identity.
 
 **What gets captured.** Decisions and why, gotchas and their cause, stated
 preferences, resolved root causes. A fact is stored only if a quote supporting
