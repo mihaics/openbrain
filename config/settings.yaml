@@ -54,7 +54,9 @@ capture:
   # Auto-capture is opt-in twice: globally, and per project. Entries are
   # absolute paths covering their whole subtree, so one entry per work tree
   # admits every repository under it, present and future.
-  enabled: true
+  # Disabled 2026-08-12: an audit of 30 real transcripts kept 1 of 10 extracted
+  # facts. Re-enable once extraction meets the bar, not before.
+  enabled: false
   projects:
     - /home/mihai/work/quarticle
     - /home/mihai/work/pactos
