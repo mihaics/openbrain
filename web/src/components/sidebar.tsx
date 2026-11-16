@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { Search, Clock, Users, Share2, Settings, Brain, Plus, X } from "lucide-react";
+import { Search, Clock, Users, Share2, Brain, Plus, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -13,7 +13,6 @@ const navItems = [
   { href: "/timeline", label: "Timeline", icon: Clock },
   { href: "/entities", label: "Entities", icon: Users },
   { href: "/graph", label: "Graph", icon: Share2 },
-  { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 export function Sidebar({

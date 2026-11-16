@@ -84,7 +84,4 @@ export const api = {
     params.set("limit", String(limit));
     return apiFetch<GraphData>(`/memories/graph?${params}`);
   },
-  getSettings: () => apiFetch<Record<string, unknown>>("/settings"),
-  saveSettings: (settings: Record<string, unknown>) =>
-    apiFetch<{ status: string }>("/settings", { method: "PUT", body: JSON.stringify(settings) }),
 };

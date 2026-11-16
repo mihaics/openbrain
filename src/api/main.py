@@ -3,8 +3,6 @@ Open Brain REST API.
 FastAPI server for memory operations.
 """
 import os
-import yaml
-from pathlib import Path
 from typing import List, Optional
 from contextlib import asynccontextmanager
 
@@ -401,9 +399,6 @@ async def get_weekly_report(days: int = Query(7, le=30)):
     return {"report": report}
 
 
-SETTINGS_PATH = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
-
-
 @app.get("/entities/types")
 async def entity_types():
     """Get entity type summary with counts."""
@@ -425,24 +420,6 @@ async def entity_memories_endpoint(
     """Get memories containing a specific entity."""
     results = get_entity_memories(type, name, limit)
     return [MemoryResponse.from_memory(m) for m in results]
-
-
-@app.get("/settings")
-async def get_settings():
-    """Get current settings."""
-    if SETTINGS_PATH.exists():
-        with open(SETTINGS_PATH) as f:
-            return yaml.safe_load(f) or {}
-    return {}
-
-
-@app.put("/settings")
-async def update_settings(settings: dict):
-    """Update settings."""
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_PATH, "w") as f:
-        yaml.dump(settings, f, default_flow_style=False)
-    return {"status": "saved"}
 
 
 if __name__ == "__main__":
